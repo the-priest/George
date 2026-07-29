@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <radialGradient id="core" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#d9f7ff"/>
+      <stop offset="45%" stop-color="#5fd8f5"/>
+      <stop offset="100%" stop-color="#12556b"/>
+    </radialGradient>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#131a22"/>
+      <stop offset="100%" stop-color="#070a0d"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#plate)"
+        stroke="#1e2731" stroke-width="2"/>
+
+  <circle cx="64" cy="64" r="42" fill="none" stroke="#1e2731" stroke-width="3"/>
+  <circle cx="64" cy="64" r="34" fill="none" stroke="#35c9f0" stroke-width="2"
+          stroke-opacity="0.55"/>
+
+  <g stroke="#35c9f0" stroke-width="3" stroke-linecap="round" stroke-opacity="0.85">
+    <path d="M64 22 L64 34"/>
+    <path d="M64 94 L64 106"/>
+    <path d="M22 64 L34 64"/>
+    <path d="M94 64 L106 64"/>
+    <path d="M34.4 34.4 L42.9 42.9"/>
+    <path d="M85.1 85.1 L93.6 93.6"/>
+    <path d="M93.6 34.4 L85.1 42.9"/>
+    <path d="M42.9 85.1 L34.4 93.6"/>
+  </g>
+
+  <circle cx="64" cy="64" r="22" fill="none" stroke="#35c9f0" stroke-width="2"/>
+  <circle cx="64" cy="64" r="15" fill="url(#core)"/>
+  <circle cx="64" cy="64" r="6" fill="#eafaff"/>
+
+  <text x="64" y="118" font-family="monospace" font-size="12" font-weight="bold"
+        letter-spacing="3" text-anchor="middle" fill="#35c9f0">GEORGE</text>
+</svg>

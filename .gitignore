@@ -1,0 +1,35 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# editors / os
+.vscode/
+.idea/
+*.swp
+.DS_Store
+*~
+
+# secrets - George has no API keys, but a stray local config still has
+# your paths and settings in it
+config.json
+*.key
+*.pem
+.env
+
+# George runtime artefacts
+george.log
+ollama.log
+ollama-install.log
+memory.json
+notes.md
+chats.json
+*.onnx
+
+# never ignore the app itself
+!george.py
+!george_core.py
+!george_tools.py
+!george_voice.py

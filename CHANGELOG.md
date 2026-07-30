@@ -1,29 +1,57 @@
-# Changelog
+# George changelog
+
+## 2.0.0
+
+Rebuilt the interface, gave him a voice worth listening to, and made the
+whole thing hold together when something goes wrong.
+
+### Look
+- New `george_theme.py`: the stylesheet is built from config, so accent,
+  font scale and density change the whole app in one reload. Six accents
+  (cyan default). 16px radii, gradient surfaces, pill buttons, hover and
+  focus transitions, rounded scrollbars.
+- New `george_hud.py`: the instruments, drawn in cairo because GTK's CSS
+  has no `@keyframes`. Reactor core (rotating sweep, 48-tick ring lit to
+  real CPU load, breathing disc), ring gauges for cpu/ram/disk, a CPU
+  sparkline, and a pulsing state dot in the header.
+- The core is a state display, not decoration: slow at idle, fast while
+  thinking, breathing while speaking, flat red when the engine is down.
+- Replies render as rich text: bold, lists, links, and fenced code as its
+  own card with a copy button.
+- Empty state with clickable suggestion chips instead of a blank pane.
+- Keyboard: Enter, Shift+Enter, Esc, Ctrl+K/N/M/H, Ctrl+comma, F5, F9.
+- pycairo is optional. Without it every instrument degrades to a plain
+  widget instead of taking the window down.
+
+### Voice
+- Three personas: jarvis (default), plain, blunt.
+- Speech normalisation: GiB reads as gigabytes, 87% as 87 percent, code
+  fences as "code on screen", URLs as "the link on screen".
+- Piper picks a voice matching your locale instead of the first file it
+  finds. espeak gets a configurable pitch and an en-gb voice.
+
+### Can do
+- Eight new tools: write_file, find, processes, network, disk, volume,
+  power, open_path. 28 in total.
+- Writes are sandbox-checked before the file is opened, and confirmed
+  unless you turn that off. `power` has no code path that skips the
+  confirmation.
+
+### Holds together
+- Config coercion: every value is forced to the shape of its default and
+  clamped to a sane range. A hand-edited config cannot hand a widget a
+  string. Invalid JSON is kept as `config.json.broken` rather than wiped.
+- Tool watchdog: a wedged tool is abandoned and the turn carries on. Time
+  spent reading a confirmation dialog does not count against it.
+- Crash handlers on the main thread and workers, log rotation at 2 MB,
+  HTTP retries, and every UI callback wrapped so an exception cannot kill
+  a GLib idle handler silently.
+- Ollama errors say what to do about them; a model tag that is not pulled
+  falls back to one that is; a stalled stream says so.
+- install.sh installs the two new modules and pycairo, and no longer
+  leaks a bash error when uninstalling without a terminal.
 
 ## 1.0.0
-
-First release. George is Basilisk's shell with the security arsenal
-removed and a Jarvis in its place.
-
-- GTK4/libadwaita window: HUD sidebar (clock, live system vitals, engine
-  status, weather, news, saved chats), chat transcript, live per-step
-  action feed, send button that becomes stop mid-turn
-- 20 tools: web search and page reading, RSS news that lands on your
-  screen, weather, system vitals, one shell command at a time, app
-  launching, media and volume, clipboard, screenshots, sandboxed file
-  reads, notes, long-term memory, arithmetic, timers, speech
-- Local Ollama only. `deepseek-r1:7b` by default, no API key anywhere in
-  the program
-- Ollama starts with the app and stops with it, but only if George was
-  the one that started it; systemd-owned and already-running daemons are
-  used and left alone
-- Model manager in-app: list, switch, delete, and pull anything from
-  ollama.com/library with a progress bar
-- Saved chats in the sidebar, click to reload, auto-delete after 24h
-- Piper/espeak speech out, whisper.cpp/faster-whisper push-to-talk, all
-  local
-- Structural destructive-command gate with no override; `curl | bash`
-  refused; file access sandboxed to home
-- `install.sh`: one-line install tuned for CachyOS, works across
-  pacman/apt/dnf/zypper/apk/xbps, picks the CUDA or ROCm ollama build on
-  Arch, `--uninstall` included
+First release. GTK4 shell, local Ollama brain, 20 tools, voice in and
+out, ollama lifecycle tied to the app, in-app model manager, one-line
+installer.

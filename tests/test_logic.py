@@ -92,7 +92,12 @@ for alias, target in G.TOOL_ALIASES.items():
 
 # ---- text utils
 eq("html", G.html_to_text("<p>Hello <b>world</b></p><script>x=1</script>"), "Hello world")
-eq("speech", G.clean_for_speech("check `ls` and https://x.com **now**"), "check and link now")
+# 2.0 speaks the command name instead of swallowing it, and says where
+# the link went rather than the word "link" on its own.
+eq("speech", G.clean_for_speech("check `ls` and https://x.com **now**"),
+   "check ls and the link on screen now")
+eq("speech units", G.clean_for_speech("41.2 GiB free, CPU at 87%"),
+   "41.2 gigabytes free, C P U at 87 percent")
 eq("calc", G.safe_calc("2+3*4"), "14")
 assert G.safe_calc("__import__('os').system('x')").startswith("refused"), "calc escape!"
 assert G.safe_calc("open('/etc/passwd')").startswith("refused"), "calc escape 2!"

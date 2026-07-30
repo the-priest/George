@@ -21,13 +21,14 @@ import urllib.parse
 from typing import Any, Callable, Dict, List, Tuple
 
 from george_core import (
-    APP_NAME, DEFAULT_FEEDS, HOME, MemoryStore, NOTES_PATH, Ollama,
-    OllamaError, _ensure_dirs, clipboard_read, clipboard_write, fetch_news,
-    html_to_text, http_get, inside_sandbox, is_destructive_command,
-    is_network_pipe_to_shell, command_needs_confirmation, launch_app, log,
-    media_control, notify, open_in_browser, run_shell,
-    safe_calc, strip_reasoning, system_status, take_screenshot, weather,
-    web_search,
+    APP_NAME, DEFAULT_FEEDS, HOME, POWER_ACTIONS, MemoryStore, NOTES_PATH,
+    Ollama, OllamaError, _ensure_dirs, clipboard_read, clipboard_write,
+    disk_report, fetch_news, find_files, html_to_text, http_get,
+    inside_sandbox, is_destructive_command, is_network_pipe_to_shell,
+    command_needs_confirmation, launch_app, list_processes, log,
+    media_control, network_status, notify, open_in_browser, open_path,
+    power_action, run_shell, safe_calc, strip_reasoning, system_status,
+    take_screenshot, volume_control, weather, web_search, write_text_file,
 )
 from george_voice import TextToSpeech
 
@@ -45,14 +46,22 @@ web_search   {"query": str, "count": int}      search the web
 open_page    {"url": str}                      fetch a page and read it
 news         {"topic": str, "count": int}      pull headlines from the feeds
 show         {"url": str}                      OPEN IT ON HIS SCREEN in the browser
+open_path    {"path": str}                     open a local file or folder on his screen
 weather      {"location": str}                 current conditions + today
 system       {}                                cpu, memory, disk, battery, uptime
+processes    {"sort": "cpu"|"memory"}          what is eating the box
+network      {}                                interfaces, addresses, wifi, gateway
+disk         {}                                filesystem usage
 run          {"command": str}                  one shell command on this box
 launch       {"app": str}                      start a desktop application
 media        {"action": str}                   play|pause|next|previous|volume_up|volume_down|mute|current
+volume       {"action": "up"|"down"|"mute"|"get", "level": int}
+power        {"action": "lock"|"suspend"|"logout"|"reboot"|"shutdown"}
 clipboard    {"mode": "read"|"write", "text": str}
 screenshot   {}                                grab the screen and show it in chat
 read_file    {"path": str}                     read a text file
+write_file   {"path": str, "text": str, "append": bool}   needs his OK
+find         {"pattern": str, "path": str}     search for files by name
 list_dir     {"path": str}                     list a directory
 note         {"text": str}                     append to his notes file
 remember     {"key": str, "value": str}        store a fact for good
@@ -64,37 +73,62 @@ say          {"text": str}                     speak out loud without ending the
 answer       {"text": str}                     FINAL reply to him - ends the turn\
 """
 
-SYSTEM_PROMPT = """You are George, a local AI running on {distro} as a desktop \
-assistant. You are Basilisk's brother: same build, no security tooling. You are \
-NOT a hacking tool and you do not do offensive security - if asked, say so \
-plainly and move on.
+# Three registers.  "jarvis" is the default and the one he asked for:
+# unhurried, precise, a little dry, never chirpy.
+PERSONAS = {
+    "jarvis": """VOICE
+You are unhurried and precise, like a good butler who happens to run on a GPU. \
+Dry wit, used sparingly and never at his expense. You confirm what you did in \
+as few words as it takes, then stop. If something is wrong you say so first and \
+soften nothing.
+Openers you use: "Done." "Already on screen." "Two things worth flagging."
+Openers you never use: "Certainly!" "I'd be happy to help!" "Great question!"
+You do not narrate your plan before doing it, you do not apologise for working, \
+and you never end with an offer of further assistance. He will ask.""",
+    "plain": """VOICE
+Clear, neutral, helpful. Full sentences, no filler, no cheerleading. State what \
+you did and what you found.""",
+    "blunt": """VOICE
+Short. Blunt. No pleasantries, no hedging, no closing offers. Answer, then \
+stop. Swearing is fine if it is his register first.""",
+}
 
-You act like Jarvis: dry, brief, competent. You do things instead of describing \
-how they could be done. No preamble, no "certainly", no lecture.
+SYSTEM_PROMPT = """You are George, a local AI running on {distro} as {name}'s \
+desktop assistant. Everything about you is on this machine: a local Ollama \
+model, no API key, no cloud, no telemetry. You are Basilisk's brother, same \
+build without the security tooling - you are NOT a hacking tool and you do not \
+do offensive security. If asked for that, say so in one line and move on.
+
+{persona}
 
 HOW YOU ACT
+You do things instead of describing how they could be done.
 To use a tool, output ONE raw JSON object and nothing else:
 {{"tool": "web_search", "args": {{"query": "irish budget 2026"}}}}
-No markdown fence, no commentary around it. You get the result back as an \
-observation, then you decide the next move.
+No markdown fence, no commentary around it, one object per turn. You get the \
+result back as an observation, then you decide the next move.
 
-When you are done, reply with:
+When you are finished, reply with:
 {{"tool": "answer", "args": {{"text": "your reply to him"}}}}
 
 TOOLS
 {tools}
 
 RULES
-- Do not guess at anything current. Today's date, news, weather, prices, what \
-is on his disk: look it up with a tool first.
-- "show me", "put it on screen", "open it" means the `show` tool, not a \
-description of the link.
-- Never suggest more than ONE shell command in a reply.
-- On Arch/CachyOS always use `pacman -Syu <pkg>`, never a bare `-S`.
-- Keep your reasoning short. He wants the result, not the working.
-- Final answers: a few sentences unless he asks for depth. He reads them on \
-screen and hears them read aloud.
-- Never invent tool output. If a tool fails, say what failed.
+- Do not guess at anything current. The date, news, weather, prices, what is on \
+his disk: look it up with a tool first, then answer from what came back.
+- "show me", "put it on screen", "open it" means the `show` or `open_path` \
+tool. He wants the thing in front of him, not a description of it.
+- One shell command at a time. Never chain a second one onto a reply.
+- On Arch and CachyOS use `pacman -Syu <pkg>`, never a bare `-S`.
+- Anything that touches his files, his session or his power state gets \
+confirmed by him first. A declined action is a no, not a retry.
+- Keep the reasoning short. He wants the result, not the working.
+- Answers are read on screen AND spoken aloud, so write them to be heard: \
+short sentences, no ASCII tables, no emoji, no walls of text. Markdown for \
+emphasis, lists and code is fine and renders properly.
+- Never invent tool output. If a tool fails, say what failed and what you would \
+need to make it work.
 
 {extra}"""
 
@@ -356,6 +390,98 @@ def tool_say(args: Dict[str, Any], ag: "Agent") -> str:
     return "spoken"
 
 
+# ---- 2.0 tools ------------------------------------------------------
+
+def tool_write_file(args: Dict[str, Any], ag: "Agent") -> str:
+    path = str(args.get("path", "")).strip()
+    text = str(args.get("text", ""))
+    append = bool(args.get("append"))
+    if not path:
+        return "no path given"
+    full = os.path.abspath(os.path.expanduser(path))
+    if not inside_sandbox(full, ag.cfg):
+        ag.tool_card("write_file", full, "REFUSED")
+        return "REFUSED: %s is outside the sandbox root" % full
+    if not ag.cfg.get("allow_writes"):
+        exists = os.path.exists(full)
+        body = "%s %s\n\n%d characters%s" % (
+            "Append to" if append else "Write", full, len(text),
+            "\n\nThis overwrites what is there now (a .bak is kept)."
+            if exists and not append else "")
+        ag.step("waiting for his OK to write %s" % full)
+        if not ag.confirm("Write to this file?", body):
+            ag.tool_card("write_file", full, "declined")
+            return "He declined the write. Do not retry it."
+    res = write_text_file(full, text, ag.cfg, append=append)
+    ag.tool_card("write_file", full, "ok" if "wrote" in res or "appended"
+                 in res else "failed")
+    return res
+
+
+def tool_find(args: Dict[str, Any], ag: "Agent") -> str:
+    pattern = str(args.get("pattern", "") or args.get("name", "")).strip()
+    root = str(args.get("path", "") or HOME)
+    ag.step("searching %s for %s" % (root, pattern))
+    ok, res = find_files(root, pattern, ag.cfg)
+    ag.tool_card("find", pattern, "%d hits" % len(res.split("\n"))
+                 if ok else "failed")
+    return res
+
+
+def tool_processes(args: Dict[str, Any], ag: "Agent") -> str:
+    sort_by = str(args.get("sort", "") or args.get("by", "") or "cpu")
+    ag.step("checking what is running")
+    out = list_processes(sort_by, int(args.get("limit") or 12))
+    ag.tool_card("processes", "by %s" % sort_by, "ok")
+    return out
+
+
+def tool_network(args: Dict[str, Any], ag: "Agent") -> str:
+    ag.step("reading the network")
+    info = network_status()
+    ag.tool_card("network", "", "ok" if "error" not in info else "failed")
+    return "\n".join("%s: %s" % (k, v) for k, v in info.items())
+
+
+def tool_disk(args: Dict[str, Any], ag: "Agent") -> str:
+    ag.step("checking disks")
+    out = disk_report()
+    ag.tool_card("disk", "", "ok")
+    return out
+
+
+def tool_volume(args: Dict[str, Any], ag: "Agent") -> str:
+    action = str(args.get("action", "") or args.get("mode", "") or "get")
+    ag.step("volume: %s" % action)
+    res = volume_control(action, int(args.get("level") or 5))
+    ag.tool_card("volume", action, res[:40])
+    return res
+
+
+def tool_power(args: Dict[str, Any], ag: "Agent") -> str:
+    action = str(args.get("action", "")).strip().lower()
+    if action not in POWER_ACTIONS:
+        return "power actions: %s" % ", ".join(sorted(POWER_ACTIONS))
+    # No config switch turns this off.  Locking his session or pulling the
+    # power out from under his work is always a question, never a decision.
+    ag.step("waiting for his OK to %s" % action)
+    if not ag.confirm("%s the machine?" % action.title(),
+                      "George wants to %s this session now." % action):
+        ag.tool_card("power", action, "declined")
+        return "He declined. Do not retry it."
+    ag.tool_card("power", action, "running")
+    return power_action(action)
+
+
+def tool_open_path(args: Dict[str, Any], ag: "Agent") -> str:
+    path = str(args.get("path", "") or args.get("file", "")).strip()
+    ag.step("opening %s" % path)
+    res = open_path(path, ag.cfg)
+    ag.tool_card("open_path", path, "ok" if res.startswith("opened")
+                 else "failed")
+    return res
+
+
 TOOLS: Dict[str, Callable[[Dict[str, Any], "Agent"], str]] = {
     "web_search": tool_web_search,
     "open_page": tool_open_page,
@@ -377,6 +503,14 @@ TOOLS: Dict[str, Callable[[Dict[str, Any], "Agent"], str]] = {
     "calc": tool_calc,
     "timer": tool_timer,
     "say": tool_say,
+    "write_file": tool_write_file,
+    "find": tool_find,
+    "processes": tool_processes,
+    "network": tool_network,
+    "disk": tool_disk,
+    "volume": tool_volume,
+    "power": tool_power,
+    "open_path": tool_open_path,
 }
 
 # names a 7B model reaches for by mistake -> what it actually meant
@@ -391,6 +525,17 @@ TOOL_ALIASES = {
     "message": "answer", "text": "answer", "sysinfo": "system",
     "status": "system", "screen": "screenshot", "note_add": "note",
     "memory": "remember", "store": "remember",
+    "write": "write_file", "save_file": "write_file", "create_file":
+        "write_file", "edit_file": "write_file", "append_file": "write_file",
+    "search_files": "find", "locate": "find", "find_file": "find",
+    "ps": "processes", "top": "processes", "task_manager": "processes",
+    "net": "network", "ifconfig": "network", "wifi": "network",
+    "df": "disk", "storage": "disk", "disk_usage": "disk",
+    "sound": "volume", "audio": "volume", "set_volume": "volume",
+    "lock": "power", "suspend": "power", "sleep": "power",
+    "shutdown": "power", "reboot": "power", "logout": "power",
+    "open_file": "open_path", "open_folder": "open_path", "xdg_open":
+        "open_path",
 }
 
 
@@ -520,6 +665,7 @@ class Agent:
         self.history: List[Dict[str, str]] = []
         self.stop_event = threading.Event()
         self.busy = False
+        self.confirm_elapsed = 0.0
 
         # UI hooks, wired by the window
         self.on_step: Callable[[str], None] = lambda s: None
@@ -555,19 +701,26 @@ class Agent:
         self.on_image(path)
 
     def confirm(self, title: str, body: str) -> bool:
-        return self.ask_confirm(title, body)
+        """Blocks on him.  The time he spends deciding is not counted
+        against the tool watchdog -- a man reading a dialog is not a
+        wedged tool."""
+        started = time.time()
+        try:
+            return self.ask_confirm(title, body)
+        finally:
+            self.confirm_elapsed += time.time() - started
 
     # ---- prompt ------------------------------------------------------
     def system_message(self) -> str:
         st = system_status()
+        name = (self.cfg.get("user_name") or "").strip()
         extra_bits = ["CONTEXT",
                       "Now: %s" % time.strftime("%A %d %B %Y, %H:%M %Z"),
                       "Host: %s on %s, up %s" % (st.get("host", "?"),
                                                  st.get("distro", "?"),
                                                  st.get("uptime", "?"))]
-        name = (self.cfg.get("user_name") or "").strip()
-        if name:
-            extra_bits.append("You call him %s." % name)
+        if st.get("battery"):
+            extra_bits.append("Battery: %s" % st["battery"])
         if self.cfg.get("location"):
             extra_bits.append("He is in %s." % self.cfg["location"])
         mem = self.memory.as_prompt_block()
@@ -576,7 +729,13 @@ class Agent:
         if not self.cfg.get("auto_run_commands"):
             extra_bits.append("Shell commands need his confirmation; a "
                               "declined command is a no, not a retry.")
+        if not self.cfg.get("allow_writes"):
+            extra_bits.append("File writes need his confirmation too.")
+        persona = PERSONAS.get(str(self.cfg.get("persona", "jarvis")),
+                               PERSONAS["jarvis"])
         return SYSTEM_PROMPT.format(distro=st.get("distro", "Linux"),
+                                    name=name or "his",
+                                    persona=persona,
                                     tools=TOOL_SPEC,
                                     extra="\n".join(extra_bits))
 
@@ -588,6 +747,47 @@ class Agent:
 
     def reset(self) -> None:
         self.history = []
+
+    # ---- tool execution ----------------------------------------------
+    def call_tool(self, tool: str, args: Dict[str, Any]) -> str:
+        """Run one tool with a deadline.
+
+        A tool that blocks forever -- a dead socket, an NFS mount that
+        went away, a subprocess that will not return -- used to take the
+        whole turn with it and leave the stop button as the only way
+        out.  Now the loop gets an observation back either way.  The
+        orphan thread is left to finish and die on its own; killing a
+        thread mid-syscall is worse than leaking one.
+        """
+        fn = TOOLS.get(tool)
+        if not fn:
+            return ("unknown tool %r. Valid tools: %s"
+                    % (tool, ", ".join(sorted(TOOLS))))
+        box: Dict[str, str] = {}
+        self.confirm_elapsed = 0.0
+
+        def work() -> None:
+            try:
+                box["result"] = fn(args, self)
+            except Exception as exc:
+                log("tool %s crashed: %s" % (tool, exc))
+                box["result"] = "%s failed: %s" % (tool, exc)
+
+        worker = threading.Thread(target=work, daemon=True,
+                                  name="george-tool-%s" % tool)
+        worker.start()
+        limit = float(self.cfg.get("tool_timeout", 150) or 150)
+        started = time.time()
+        while worker.is_alive():
+            worker.join(0.4)
+            if self.stop_event.is_set():
+                return "%s was stopped before it finished." % tool
+            if time.time() - started > limit + self.confirm_elapsed:
+                log("tool %s hit the %ds watchdog" % (tool, limit))
+                return ("%s did not come back within %ds and was abandoned. "
+                        "Tell him that, and try another way."
+                        % (tool, int(limit)))
+        return box.get("result", "%s returned nothing" % tool)
 
     # ---- the loop ----------------------------------------------------
     def run_turn(self, user_text: str) -> None:
@@ -601,6 +801,14 @@ class Agent:
                     "ollama is not answering on %s. start it with "
                     "`ollama serve`." % self.ollama.base)
 
+            model, note = self.ollama.resolve_model()
+            if note:
+                self.on_error(note)
+
+            def stalled(waited: float) -> None:
+                self.on_step("still thinking - %ds with no output"
+                             % int(waited))
+
             for step_no in range(int(self.cfg.get("max_steps", 14))):
                 if self.stop_event.is_set():
                     self.on_step("stopped")
@@ -608,7 +816,8 @@ class Agent:
 
                 self.on_step("thinking (step %d)" % (step_no + 1))
                 reply = self.ollama.chat_stream(self.messages(), self.on_token,
-                                                self.stop_event)
+                                                self.stop_event,
+                                                on_stall=stalled, model=model)
                 if self.stop_event.is_set():
                     self.on_step("stopped")
                     break
@@ -643,17 +852,11 @@ class Agent:
                         continue
                     last_calls.append(sig)
 
-                    fn = TOOLS.get(tool)
-                    if not fn:
-                        observations.append(
-                            "unknown tool %r. Valid tools: %s"
-                            % (tool, ", ".join(sorted(TOOLS))))
-                        continue
-                    try:
-                        result = fn(args, self)
-                    except Exception as exc:          # a tool must never
-                        log("tool %s crashed: %s" % (tool, exc))  # kill the loop
-                        result = "%s failed: %s" % (tool, exc)
+                    result = self.call_tool(tool, args)
+                    if len(result) > 6000:
+                        # A 7B model on an 8k window drowns in a huge
+                        # observation and starts ignoring the question.
+                        result = result[:6000] + "\n[... trimmed]"
                     observations.append("OBSERVATION (%s):\n%s" % (tool, result))
 
                 if final_text is not None:

@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = os.path.join(
@@ -67,26 +67,64 @@ DEFAULTS: Dict[str, Any] = {
     "keep_alive": "30m",
     "max_steps": 14,
     "request_timeout": 300,
+    "stall_seconds": 90,             # no token for this long = say so
+    "tool_timeout": 150,             # a wedged tool cannot wedge the turn
+    "auto_model_fallback": True,     # configured model gone -> use one here
 
     "voice_enabled": True,
     "voice_engine": "auto",          # auto | piper | espeak | none
     "voice_speed": 1.0,
+    "voice_pitch": 38,               # espeak only, 0-99
     "piper_model": "",
+    "piper_voice_pref": "en_GB",     # which voice to pick when several
     "stt_enabled": True,
 
     "auto_run_commands": False,      # False = confirm every shell command
     "allow_writes": False,           # file writes outside the notes file
     "sandbox_root": HOME,
 
+    "persona": "jarvis",             # jarvis | plain | blunt
+    "accent": "cyan",                # cyan | amber | violet | green | red
+    "ui_density": "comfortable",     # comfortable | compact
+    "animations": True,
+    "show_reasoning": True,
+    "greet_on_start": True,
+
     "font_scale": 1.0,
     "transcript_live_rows": 40,      # widgets kept in the view
     "chat_retention_hours": 24,
+    "chat_max_sessions": 60,
 
     "feeds": DEFAULT_FEEDS,
     "news_count": 12,
     "location": "",                  # blank = wttr.in geo-IP guess
     "browser": "",                   # blank = xdg-open
     "user_name": "",
+}
+
+# Anything numeric gets clamped to these on load, so a hand-edited or
+# half-written config can never hand the UI a value that breaks a widget.
+LIMITS: Dict[str, Tuple[float, float]] = {
+    "temperature": (0.0, 2.0),
+    "num_ctx": (1024, 131072),
+    "max_steps": (1, 40),
+    "request_timeout": (10, 3600),
+    "stall_seconds": (10, 600),
+    "tool_timeout": (5, 900),
+    "voice_speed": (0.5, 2.0),
+    "voice_pitch": (0, 99),
+    "font_scale": (0.75, 2.0),
+    "transcript_live_rows": (10, 400),
+    "chat_retention_hours": (0, 8760),
+    "chat_max_sessions": (5, 500),
+    "news_count": (3, 40),
+}
+
+CHOICES: Dict[str, Tuple[str, ...]] = {
+    "voice_engine": ("auto", "piper", "espeak", "none"),
+    "persona": ("jarvis", "plain", "blunt"),
+    "accent": ("cyan", "amber", "violet", "green", "red", "white"),
+    "ui_density": ("comfortable", "compact"),
 }
 
 
@@ -96,6 +134,63 @@ def _ensure_dirs() -> None:
             os.makedirs(d, exist_ok=True)
         except OSError:
             pass
+
+
+def coerce_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Force every value to the shape of its default.
+
+    A config file is a text file he can edit, and half-written JSON, a
+    string where a number belongs, or a stale key from an older build
+    all have to end in a usable app rather than a traceback on a widget
+    three screens away.  Anything that cannot be repaired is replaced by
+    its default and logged.
+    """
+    out: Dict[str, Any] = {}
+    for key, default in DEFAULTS.items():
+        value = cfg.get(key, default)
+        try:
+            if isinstance(default, bool):
+                if isinstance(value, str):
+                    value = value.strip().lower() in ("1", "true", "yes", "on")
+                value = bool(value)
+            elif isinstance(default, float):
+                value = float(value)
+            elif isinstance(default, int):
+                value = int(float(value))
+            elif isinstance(default, str):
+                value = str(value)
+            elif isinstance(default, list):
+                if not isinstance(value, list) or not value:
+                    value = default
+                else:
+                    rows = [[str(r[0]), str(r[1])] for r in value
+                            if isinstance(r, (list, tuple)) and len(r) >= 2
+                            and str(r[1]).strip()]
+                    value = rows or default
+        except (TypeError, ValueError):
+            log("config: %s=%r is not usable, using the default" % (key, value))
+            value = default
+
+        lo_hi = LIMITS.get(key)
+        if lo_hi is not None and isinstance(value, (int, float)):
+            lo, hi = lo_hi
+            clamped = min(hi, max(lo, value))
+            if clamped != value:
+                log("config: %s clamped to %s" % (key, clamped))
+            value = type(default)(clamped)
+
+        allowed = CHOICES.get(key)
+        if allowed and value not in allowed:
+            log("config: %s=%r is not one of %s, using %s"
+                % (key, value, allowed, default))
+            value = default
+
+        out[key] = value
+
+    root = str(out.get("sandbox_root") or "").strip()
+    if not root or not os.path.isdir(os.path.expanduser(root)):
+        out["sandbox_root"] = HOME
+    return out
 
 
 def load_config() -> Dict[str, Any]:
@@ -108,8 +203,18 @@ def load_config() -> Dict[str, Any]:
             for k, v in disk.items():
                 if k in DEFAULTS:
                     cfg[k] = v
-    except (OSError, ValueError):
+    except OSError:
         pass
+    except ValueError as exc:
+        # Keep the broken file so he can look at it; do not overwrite it
+        # silently and lose whatever he was in the middle of typing.
+        log("config is not valid JSON (%s); starting from defaults" % exc)
+        try:
+            os.replace(CONFIG_PATH, CONFIG_PATH + ".broken")
+        except OSError:
+            pass
+
+    cfg = coerce_config(cfg)
     if os.environ.get("GEORGE_OLLAMA"):
         cfg["ollama_url"] = os.environ["GEORGE_OLLAMA"].rstrip("/")
     if os.environ.get("GEORGE_MODEL"):
@@ -129,6 +234,17 @@ def save_config(cfg: Dict[str, Any]) -> None:
 
 
 _log_lock = threading.Lock()
+LOG_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _rotate_log() -> None:
+    """Keep one previous log.  Called with the lock held."""
+    try:
+        if os.path.getsize(LOG_PATH) < LOG_MAX_BYTES:
+            return
+        os.replace(LOG_PATH, LOG_PATH + ".1")
+    except OSError:
+        pass
 
 
 def log(msg: str) -> None:
@@ -136,12 +252,36 @@ def log(msg: str) -> None:
     with _log_lock:
         try:
             _ensure_dirs()
+            _rotate_log()
             with open(LOG_PATH, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
         except OSError:
             pass
     if os.environ.get("GEORGE_DEBUG"):
         sys.stderr.write(line + "\n")
+
+
+def install_crash_handlers() -> None:
+    """Send anything that escapes -- main thread or worker -- to the log
+    file.  Without this a background thread can die with nothing on
+    screen and nothing on disk, which is the worst way to debug a
+    desktop app."""
+    import traceback
+
+    def hook(exc_type, exc, tb) -> None:
+        log("UNCAUGHT %s: %s\n%s" % (exc_type.__name__, exc,
+                                     "".join(traceback.format_tb(tb))[-4000:]))
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = hook
+
+    if hasattr(threading, "excepthook"):
+        def thook(args) -> None:
+            log("UNCAUGHT in %s: %s: %s\n%s"
+                % (getattr(args.thread, "name", "?"),
+                   getattr(args.exc_type, "__name__", "?"), args.exc_value,
+                   "".join(traceback.format_tb(args.exc_traceback))[-4000:]))
+        threading.excepthook = thook
 
 
 # =====================================================================
@@ -624,13 +764,43 @@ class Ollama:
             log("model list failed: %s" % exc)
             return []
 
+    def version(self) -> str:
+        try:
+            with urllib.request.urlopen(self.base + "/api/version",
+                                        timeout=5) as r:
+                return str(json.loads(r.read().decode("utf-8", "replace")
+                                      ).get("version", "?"))
+        except Exception:
+            return "?"
+
+    def resolve_model(self) -> Tuple[str, str]:
+        """-> (model_to_use, note).
+
+        If the configured tag is not pulled, fall back to something that
+        is rather than failing the turn.  A model he did not choose is
+        worth saying out loud, hence the note.
+        """
+        want = str(self.cfg.get("model", DEFAULTS["model"]))
+        if not self.cfg.get("auto_model_fallback", True):
+            return want, ""
+        names = self.models()
+        if not names or want in names:
+            return want, ""
+        # exact tag missing: same family with any tag is the closest thing
+        stem = want.split(":")[0]
+        same = [n for n in names if n.split(":")[0] == stem]
+        pick = (same or names)[0]
+        return pick, ("%s is not pulled - using %s instead" % (want, pick))
+
     def chat_stream(self, messages: List[Dict[str, str]],
                     on_token: Callable[[str], None],
-                    stop: threading.Event) -> str:
+                    stop: threading.Event,
+                    on_stall: Optional[Callable[[float], None]] = None,
+                    model: str = "") -> str:
         """Stream a reply.  Returns the full text.  Honours the stop event
         between chunks so the UI stop button is never a lie."""
         payload = {
-            "model": self.cfg.get("model", DEFAULTS["model"]),
+            "model": model or str(self.cfg.get("model", DEFAULTS["model"])),
             "messages": messages,
             "stream": True,
             "keep_alive": self.cfg.get("keep_alive", "30m"),
@@ -640,13 +810,33 @@ class Ollama:
             },
         }
         timeout = int(self.cfg.get("request_timeout", 300))
+        stall_after = float(self.cfg.get("stall_seconds", 90))
         chunks: List[str] = []
         try:
             resp = self._post("/api/chat", payload, timeout)
+        except urllib.error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", "replace")[:400]
+                body = str(json.loads(body).get("error", body))
+            except Exception:
+                pass
+            if exc.code == 404:
+                raise OllamaError(
+                    "ollama does not have %s. pull it from the Models "
+                    "window, or run: ollama pull %s"
+                    % (payload["model"], payload["model"])) from exc
+            raise OllamaError("ollama said %s: %s"
+                              % (exc.code, body or exc.reason)) from exc
         except urllib.error.URLError as exc:
             raise OllamaError(
                 "cannot reach ollama at %s (%s). is `ollama serve` running?"
-                % (self.base, exc)) from exc
+                % (self.base, exc.reason)) from exc
+        except Exception as exc:
+            raise OllamaError("ollama request failed: %s" % exc) from exc
+
+        last_token = time.time()
+        warned = False
         with resp:
             for raw in resp:
                 if stop.is_set():
@@ -663,7 +853,14 @@ class Ollama:
                 piece = (obj.get("message") or {}).get("content", "")
                 if piece:
                     chunks.append(piece)
+                    last_token = time.time()
+                    warned = False
                     on_token(piece)
+                elif on_stall is not None and not warned:
+                    waited = time.time() - last_token
+                    if waited > stall_after:
+                        warned = True
+                        on_stall(waited)
                 if obj.get("done"):
                     break
         return "".join(chunks)
@@ -719,14 +916,36 @@ def html_to_text(raw: str, limit: int = 8000) -> str:
     return s[:limit]
 
 
-def http_get(url: str, timeout: int = 20, limit: int = 400000) -> str:
+def http_get(url: str, timeout: int = 20, limit: int = 400000,
+             attempts: int = 2) -> str:
+    """One GET, retried once on a transient failure.
+
+    Feeds and search endpoints drop connections often enough that a
+    single blip should not become "no headlines" on his screen.  4xx is
+    not retried -- that answer will not change.
+    """
     req = urllib.request.Request(url, headers={
         "User-Agent": UA,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-GB,en;q=0.9",
     })
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = resp.read(limit)
+    last: Optional[Exception] = None
+    data = b""
+    for attempt in range(max(1, attempts)):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read(limit)
+            break
+        except urllib.error.HTTPError as exc:
+            if 400 <= exc.code < 500:
+                raise
+            last = exc
+        except Exception as exc:
+            last = exc
+        if attempt + 1 < max(1, attempts):
+            time.sleep(0.8 * (attempt + 1))
+    else:
+        raise last if last else RuntimeError("request failed")
     charset = "utf-8"
     m = re.search(rb'charset=["\']?([\w\-]+)', data[:2048], re.I)
     if m:
@@ -878,6 +1097,43 @@ def _read_first(path: str, default: str = "") -> str:
         return default
 
 
+class CpuMeter:
+    """Busy percentage from /proc/stat deltas.
+
+    The first call has no previous sample to diff against, so it reports
+    0 rather than a made-up number.
+    """
+
+    def __init__(self) -> None:
+        self._prev: Optional[Tuple[int, int]] = None
+        self._lock = threading.Lock()
+
+    def sample(self) -> float:
+        line = _read_first("/proc/stat").split("\n")[0]
+        parts = line.split()
+        if len(parts) < 5 or parts[0] != "cpu":
+            return 0.0
+        try:
+            nums = [int(x) for x in parts[1:11]]
+        except ValueError:
+            return 0.0
+        idle = nums[3] + (nums[4] if len(nums) > 4 else 0)
+        total = sum(nums)
+        with self._lock:
+            prev = self._prev
+            self._prev = (idle, total)
+        if prev is None:
+            return 0.0
+        d_idle = idle - prev[0]
+        d_total = total - prev[1]
+        if d_total <= 0:
+            return 0.0
+        return min(100.0, max(0.0, 100.0 * (1.0 - d_idle / float(d_total))))
+
+
+_cpu_meter = CpuMeter()
+
+
 def system_status() -> Dict[str, str]:
     st: Dict[str, str] = {}
     uname = os.uname()
@@ -898,6 +1154,13 @@ def system_status() -> Dict[str, str]:
         st["uptime"] = "?"
 
     st["load"] = " ".join(_read_first("/proc/loadavg", "").split()[:3])
+    cpu = _cpu_meter.sample()
+    st["cpu"] = "%d%%" % int(round(cpu))
+    st["cpu_pct"] = str(int(round(cpu)))
+    try:
+        st["cores"] = str(os.cpu_count() or 1)
+    except Exception:
+        pass
 
     mem: Dict[str, int] = {}
     for line in _read_first("/proc/meminfo").splitlines():
@@ -914,6 +1177,11 @@ def system_status() -> Dict[str, str]:
         st["memory"] = "%.1f / %.1f GiB (%d%%)" % (
             used / 1048576.0, total / 1048576.0, round(100.0 * used / total))
         st["mem_pct"] = str(round(100.0 * used / total))
+    sw_total = mem.get("SwapTotal", 0)
+    sw_free = mem.get("SwapFree", 0)
+    if sw_total:
+        st["swap"] = "%.1f / %.1f GiB" % ((sw_total - sw_free) / 1048576.0,
+                                          sw_total / 1048576.0)
     try:
         du = shutil.disk_usage(HOME)
         st["disk"] = "%.0f / %.0f GiB free on home" % (
@@ -1125,6 +1393,264 @@ def safe_calc(expression: str) -> str:
     except Exception as exc:
         return "arithmetic error: %s" % exc
 
+
+# =====================================================================
+# NEW IN 2.0  --  writes, search, processes, network, volume, power
+#
+# Everything here that can change the machine is written so the refusal
+# is structural: the sandbox check happens before the open(), and the
+# destructive power actions have no code path that skips confirmation.
+# =====================================================================
+
+def write_text_file(path: str, text: str, cfg: Dict[str, Any],
+                    append: bool = False) -> str:
+    """Write inside the sandbox root only, atomically, with a backup of
+    whatever was there before."""
+    path = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+    if not path:
+        return "no path given"
+    if not inside_sandbox(path, cfg):
+        return "REFUSED: %s is outside the sandbox root" % path
+    if os.path.isdir(path):
+        return "REFUSED: %s is a directory" % path
+    parent = os.path.dirname(path) or "."
+    try:
+        os.makedirs(parent, exist_ok=True)
+    except OSError as exc:
+        return "cannot create %s: %s" % (parent, exc)
+    try:
+        if append:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(text)
+            return "appended %d chars to %s" % (len(text), path)
+        if os.path.exists(path):
+            try:
+                shutil.copy2(path, path + ".bak")
+            except OSError:
+                pass
+        tmp = path + ".george.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except OSError as exc:
+        return "write failed: %s" % exc
+    return "wrote %d chars to %s%s" % (
+        len(text), path, " (previous kept as .bak)"
+        if os.path.exists(path + ".bak") else "")
+
+
+_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".cache", ".venv",
+              "venv", ".mozilla", ".thunderbird", "snap"}
+
+
+def find_files(root: str, pattern: str, cfg: Dict[str, Any],
+               limit: int = 60, max_dirs: int = 4000) -> Tuple[bool, str]:
+    """Walk for a glob-ish name match, bounded in both directions so a
+    search of / cannot hang the turn."""
+    import fnmatch
+    root = os.path.abspath(os.path.expanduser(str(root or HOME).strip()))
+    pattern = str(pattern or "").strip()
+    if not pattern:
+        return False, "no pattern given"
+    if not inside_sandbox(root, cfg):
+        return False, "REFUSED: %s is outside the sandbox root" % root
+    if not os.path.isdir(root):
+        return False, "not a directory: %s" % root
+    if "*" not in pattern and "?" not in pattern:
+        pattern = "*%s*" % pattern
+    hits: List[str] = []
+    scanned = 0
+    started = time.time()
+    for base, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs
+                   if d not in _SKIP_DIRS and not d.startswith(".git")]
+        scanned += 1
+        if scanned > max_dirs or time.time() - started > 20:
+            hits.append("[search stopped early - narrow it down]")
+            break
+        for name in files:
+            if fnmatch.fnmatch(name.lower(), pattern.lower()):
+                full = os.path.join(base, name)
+                try:
+                    hits.append("%s  %d bytes" % (full, os.path.getsize(full)))
+                except OSError:
+                    hits.append(full)
+                if len(hits) >= limit:
+                    return True, "\n".join(hits)
+    if not hits:
+        return True, "nothing under %s matched %s" % (root, pattern)
+    return True, "\n".join(hits)
+
+
+def list_processes(sort_by: str = "cpu", limit: int = 12) -> str:
+    """Top processes via ps, with a /proc fallback if ps is missing."""
+    key = "-%cpu" if str(sort_by).lower().startswith("cpu") else "-%mem"
+    if shutil.which("ps"):
+        rc, out = run_shell(
+            "ps -eo pid,comm,%%cpu,%%mem --sort=%s --no-headers | head -n %d"
+            % (key, max(1, min(int(limit), 40))), timeout=10)
+        if rc == 0 and out.strip():
+            rows = ["pid    process            cpu%   mem%"]
+            for line in out.strip().split("\n"):
+                parts = line.split(None, 3)
+                if len(parts) >= 4:
+                    rows.append("%-6s %-18s %-6s %s" % (parts[0], parts[1][:18],
+                                                        parts[2], parts[3]))
+            return "\n".join(rows)
+    names: List[str] = []
+    try:
+        for pid in sorted(os.listdir("/proc")):
+            if pid.isdigit():
+                comm = _read_first("/proc/%s/comm" % pid)
+                if comm:
+                    names.append("%s %s" % (pid, comm))
+            if len(names) >= limit:
+                break
+    except OSError as exc:
+        return "cannot read processes: %s" % exc
+    return "\n".join(names) or "no processes readable"
+
+
+def network_status() -> Dict[str, str]:
+    """Interfaces, addresses and default route, read from the tools that
+    exist rather than assuming any one of them does."""
+    out: Dict[str, str] = {}
+    ifaces: List[str] = []
+    try:
+        for name in sorted(os.listdir("/sys/class/net")):
+            if name == "lo":
+                continue
+            state = _read_first("/sys/class/net/%s/operstate" % name, "?")
+            ifaces.append("%s (%s)" % (name, state))
+    except OSError:
+        pass
+    if ifaces:
+        out["interfaces"] = ", ".join(ifaces)
+    if shutil.which("ip"):
+        rc, txt = run_shell("ip -4 -o addr show scope global", timeout=6)
+        if rc == 0 and txt.strip():
+            addrs = []
+            for line in txt.strip().split("\n"):
+                parts = line.split()
+                if len(parts) >= 4:
+                    addrs.append("%s %s" % (parts[1], parts[3]))
+            if addrs:
+                out["addresses"] = ", ".join(addrs)
+        rc, txt = run_shell("ip route show default", timeout=6)
+        if rc == 0 and txt.strip():
+            out["gateway"] = txt.strip().split("\n")[0]
+    if shutil.which("nmcli"):
+        rc, txt = run_shell("nmcli -t -f NAME,TYPE,DEVICE connection show "
+                            "--active", timeout=8)
+        if rc == 0 and txt.strip():
+            out["connections"] = "; ".join(txt.strip().split("\n")[:4])
+    ssid = ""
+    if shutil.which("iwgetid"):
+        rc, txt = run_shell("iwgetid -r", timeout=5)
+        if rc == 0 and txt.strip():
+            ssid = txt.strip()
+    if ssid:
+        out["wifi"] = ssid
+    return out or {"error": "no network information available"}
+
+
+def volume_control(action: str, level: int = 5) -> str:
+    """pipewire, then pulse, then alsa.  Returns what actually happened."""
+    action = str(action or "").strip().lower()
+    level = max(1, min(int(level or 5), 50))
+    if shutil.which("wpctl"):
+        sink = "@DEFAULT_AUDIO_SINK@"
+        cmds = {
+            "up": "wpctl set-volume %s %d%%+" % (sink, level),
+            "down": "wpctl set-volume %s %d%%-" % (sink, level),
+            "mute": "wpctl set-mute %s toggle" % sink,
+            "get": "wpctl get-volume %s" % sink,
+        }
+    elif shutil.which("pactl"):
+        sink = "@DEFAULT_SINK@"
+        cmds = {
+            "up": "pactl set-sink-volume %s +%d%%" % (sink, level),
+            "down": "pactl set-sink-volume %s -%d%%" % (sink, level),
+            "mute": "pactl set-sink-mute %s toggle" % sink,
+            "get": "pactl get-sink-volume %s" % sink,
+        }
+    elif shutil.which("amixer"):
+        cmds = {
+            "up": "amixer -q sset Master %d%%+" % level,
+            "down": "amixer -q sset Master %d%%-" % level,
+            "mute": "amixer -q sset Master toggle",
+            "get": "amixer sget Master",
+        }
+    else:
+        return "no volume control found (wpctl, pactl or amixer)"
+    if action in ("set",):
+        return "use up, down, mute or get"
+    cmd = cmds.get(action)
+    if not cmd:
+        return "volume actions: up, down, mute, get"
+    rc, out = run_shell(cmd, timeout=8)
+    if rc != 0:
+        return "volume %s failed: %s" % (action, out[:200])
+    return out.strip() or "volume %s" % action
+
+
+POWER_ACTIONS = {
+    "lock": ["loginctl lock-session", "xdg-screensaver lock",
+             "swaylock", "i3lock"],
+    "suspend": ["systemctl suspend", "loginctl suspend"],
+    "hibernate": ["systemctl hibernate"],
+    "logout": ["loginctl terminate-session self",
+               "qdbus org.kde.ksmserver /KSMServer logout 0 0 0"],
+    "reboot": ["systemctl reboot"],
+    "shutdown": ["systemctl poweroff"],
+}
+
+
+def power_action(action: str) -> str:
+    """Session control.  The caller is responsible for confirming --
+    every one of these is disruptive, so nothing here is automatic."""
+    action = str(action or "").strip().lower()
+    candidates = POWER_ACTIONS.get(action)
+    if not candidates:
+        return "power actions: %s" % ", ".join(sorted(POWER_ACTIONS))
+    for cmd in candidates:
+        exe = cmd.split()[0]
+        if not shutil.which(exe):
+            continue
+        rc, out = run_shell(cmd, timeout=12)
+        if rc == 0:
+            return "%s: done" % action
+        return "%s failed: %s" % (action, (out or "exit %d" % rc)[:200])
+    return "nothing on this box can %s (tried %s)" % (
+        action, ", ".join(c.split()[0] for c in candidates))
+
+
+def open_path(path: str, cfg: Dict[str, Any]) -> str:
+    """xdg-open a local file or folder, sandbox-checked first."""
+    path = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+    if not os.path.exists(path):
+        return "no such path: %s" % path
+    if not inside_sandbox(path, cfg):
+        return "REFUSED: %s is outside the sandbox root" % path
+    try:
+        subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception as exc:
+        return "could not open %s: %s" % (path, exc)
+    return "opened %s on his screen" % path
+
+
+def disk_report() -> str:
+    if shutil.which("df"):
+        rc, out = run_shell("df -h -x tmpfs -x devtmpfs -x squashfs", timeout=8)
+        if rc == 0 and out.strip():
+            return out
+    try:
+        du = shutil.disk_usage(HOME)
+        return "home: %.0f GiB free of %.0f GiB" % (du.free / 1073741824.0,
+                                                    du.total / 1073741824.0)
+    except OSError as exc:
+        return "disk read failed: %s" % exc
 
 
 # =====================================================================

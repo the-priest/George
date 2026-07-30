@@ -42,14 +42,47 @@ _EMOJI = re.compile("[^\x00-\x7f]+")
 _SENT = re.compile(r"(?<=[.!?:;])\s+")
 
 
+# Things that read badly out loud.  Spoken output is not written
+# output: "GiB" is "gibibytes", "~/" is "home", and a bare "%" in the
+# middle of a sentence is a hiccup in every engine tested.
+_SPEAK_MAP = [
+    (re.compile(r"\bGiB\b"), " gigabytes"),
+    (re.compile(r"\bMiB\b"), " megabytes"),
+    (re.compile(r"\bKiB\b"), " kilobytes"),
+    (re.compile(r"\bGB\b"), " gigabytes"),
+    (re.compile(r"\bMB\b"), " megabytes"),
+    (re.compile(r"\bkB\b"), " kilobytes"),
+    (re.compile(r"(\d)\s*%"), r"\1 percent"),
+    (re.compile(r"(\d)\s*C\b"), r"\1 degrees"),
+    (re.compile(r"(\d+)\s*km/h"), r"\1 kilometres an hour"),
+    (re.compile(r"\be\.g\.", re.I), "for example"),
+    (re.compile(r"\bi\.e\.", re.I), "that is"),
+    (re.compile(r"\betc\.", re.I), "and so on"),
+    (re.compile(r"\bvs\.?\b", re.I), "versus"),
+    (re.compile(r"~/"), "home folder "),
+    (re.compile(r"\bCPU\b"), "C P U"),
+    (re.compile(r"\bRAM\b"), "ram"),
+    (re.compile(r"\bSSD\b"), "S S D"),
+    (re.compile(r"\bwifi\b", re.I), "why fye"),
+    (re.compile(r"\b(\w+)/(\w+)\b"), r"\1 \2"),
+    (re.compile(r"[-_]{2,}"), " "),
+    (re.compile(r"\s*[|>#]+\s*"), " "),
+]
+
+
 def clean_for_speech(text: str) -> str:
+    """Turn a written reply into something worth hearing."""
     s = strip_reasoning(text)
-    s = _CODE_FENCE.sub(" (code block) ", s)
-    s = _INLINE_CODE.sub(" ", s)
-    s = _URL.sub(" link ", s)
+    s = _CODE_FENCE.sub(" ... code on screen ... ", s)
+    s = _INLINE_CODE.sub(lambda m: " " + m.group(0).strip("`") + " ", s)
+    s = _URL.sub(" the link on screen ", s)
+    s = re.sub(r"\*\*(.+?)\*\*", r"\1", s, flags=re.S)
     s = _MD.sub(" ", s)
     s = _EMOJI.sub(" ", s)
+    for rx, rep in _SPEAK_MAP:
+        s = rx.sub(rep, s)
     s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"\s+([,.;:!?])", r"\1", s)
     return s.strip()
 
 
@@ -68,9 +101,14 @@ def split_sentences(text: str, max_len: int = 240) -> List[str]:
 
 
 def _find_piper_model(cfg: Dict[str, Any]) -> Optional[str]:
+    """Explicit path wins.  Otherwise prefer the configured locale --
+    an Irish box asking a US voice to read Irish place names is the
+    single most jarring thing the old build did."""
     explicit = (cfg.get("piper_model") or "").strip()
     if explicit and os.path.exists(os.path.expanduser(explicit)):
         return os.path.expanduser(explicit)
+    pref = str(cfg.get("piper_voice_pref", "en_GB") or "").lower()
+    found: List[str] = []
     for d in _PIPER_DIRS:
         d = os.path.expanduser(d)
         if not os.path.isdir(d):
@@ -78,8 +116,18 @@ def _find_piper_model(cfg: Dict[str, Any]) -> Optional[str]:
         for root, _dirs, files in os.walk(d):
             for f in sorted(files):
                 if f.endswith(".onnx"):
-                    return os.path.join(root, f)
-    return None
+                    found.append(os.path.join(root, f))
+    if not found:
+        return None
+    if pref:
+        for path in found:
+            if pref in os.path.basename(path).lower():
+                return path
+        lang = pref.split("_")[0]
+        for path in found:
+            if os.path.basename(path).lower().startswith(lang):
+                return path
+    return found[0]
 
 
 class TextToSpeech:
@@ -137,6 +185,11 @@ class TextToSpeech:
     @property
     def engine_name(self) -> str:
         return self._engine or "none"
+
+    @property
+    def speaking(self) -> bool:
+        with self._lock:
+            return self._cur is not None
 
     # ---- public ------------------------------------------------------
     def speak(self, text: str) -> None:
@@ -244,8 +297,13 @@ class TextToSpeech:
             return
         if self._engine == "espeak" and self._espeak:
             rate = str(int(165 * speed))
-            self._spawn([self._espeak, "-s", rate, "-p", "35", "-a", "180",
-                         sentence], gen)
+            pitch = str(int(self.cfg.get("voice_pitch", 38) or 38))
+            voice = str(self.cfg.get("piper_voice_pref", "en_GB")
+                        ).lower().replace("_", "-")
+            argv = [self._espeak, "-s", rate, "-p", pitch, "-a", "190"]
+            if voice.startswith("en"):
+                argv += ["-v", voice if "-" in voice else "en-gb"]
+            self._spawn(argv + [sentence], gen)
             return
         if self._engine == "spd":
             self._spawn(["spd-say", "-w", sentence], gen)

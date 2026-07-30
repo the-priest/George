@@ -134,3 +134,40 @@ makes it testable without a display.
 
 `~/.config/george/config.json` — everything in it is also in Settings.
 Memory, notes, chats and logs live in `~/.local/share/george/`.
+
+## What is on screen
+
+The left column is a HUD, not a menu. The **core** at the top is a real
+gauge: the ring fills with CPU load, spins faster while George is
+working, breathes while he is talking, and goes red when the engine is
+down. Under it: ring gauges for cpu, ram and disk, a CPU history
+sparkline, the weather, the engine state, headlines, and saved chats.
+
+Accent colour, density, font scale and animation are all in
+Settings > Interface. Turning animation off stops every cairo timer.
+
+## Keyboard
+
+| key | does |
+| --- | --- |
+| Enter | send |
+| Shift+Enter | newline |
+| Esc | stop the current turn |
+| Ctrl+K | jump to the box |
+| Ctrl+N | new conversation |
+| Ctrl+M | push to talk |
+| Ctrl+H | recent chats |
+| Ctrl+, | settings |
+| F5 | refresh news |
+| F9 | toggle the HUD |
+
+## Personas
+
+`jarvis` (default), `plain`, `blunt` - Settings > Behaviour. It changes
+how he talks, never what he is allowed to do.
+
+## If the HUD looks flat
+
+That means pycairo is missing and the instruments fell back to plain
+widgets. Install `python-cairo` (Arch), `python3-gi-cairo` (Debian),
+`python3-cairo` (Fedora/openSUSE) and restart.

@@ -39,11 +39,21 @@ def p1():
 def p2():
     w = app.win
     res["rows"] = count(w.transcript); res["feed"] = w.feed_lbl.get_text()
+    res["state"] = w.status_lbl.get_text()
     res["engine_rows"] = count(w.engine_body); res["vitals_rows"] = count(w.vitals_body)
     res["chats_rows"] = count(w.chats_body)
-    if res["rows"] < 3: res["errors"].append("transcript rows=%d" % res["rows"])
+    # 2.0 dropped the startup note row (the greeting lives in the status
+    # strip now), so a finished turn is exactly two rows: his and George's.
+    if res["rows"] < 2: res["errors"].append("transcript rows=%d" % res["rows"])
+    kinds = [c.get_first_child() for c in texts(w.transcript)]
+    css = [" ".join(k.get_css_classes()) if k else "" for k in kinds]
+    if not any("bubble-user" in c for c in css):
+        res["errors"].append("no user bubble: %s" % css)
+    if not any("bubble-ai" in c for c in css):
+        res["errors"].append("no ai bubble: %s" % css)
     for name, fn in (("models", w._open_models), ("settings", w._open_settings),
-                     ("history", w._open_history), ("about", w._open_about)):
+                     ("history", w._open_history), ("about", w._open_about),
+                     ("shortcuts", w._open_shortcuts)):
         try: fn()
         except Exception as exc: res["errors"].append("%s dialog: %r" % (name, exc))
     try:
@@ -52,7 +62,25 @@ def p2():
         w.render_weather({"place":"Dublin","temp_c":"14","feels_c":"12","desc":"Rain",
                           "wind_kph":"20","humidity":"80","max_c":"16","min_c":"9"})
         w.add_tool_card("run","uptime","exit 0"); w.toast("hello")
+        # rich rendering: markdown, a fenced block, a link, and text that
+        # would break a naive markup pass
+        w.add_ai_bubble("").finalise(
+            "**Done.** 91% used on `/home` & <not a tag>.\n\n"
+            "- one\n- two\n\n```sh\nsudo pacman -Sc\n```\n\n"
+            "See [the wiki](https://wiki.archlinux.org/) for the rest.")
+        for state in ("idle","busy","speaking","listening","down"):
+            w._set_state(state)
+        for accent in ("amber","violet","green","red","white","cyan"):
+            w.cfg["accent"] = accent; w.reload_css()
+        w.cfg["animations"] = False; w.reload_css()
+        w.cfg["animations"] = True; w.cfg["ui_density"] = "compact"; w.reload_css()
+        w.render_vitals({"host":"x","uptime":"1d","load":"0.1","cpu_pct":"55",
+                         "mem_pct":"41","disk_pct":"88","memory":"4/8 GiB",
+                         "disk":"10/100 GiB","swap":"0/2 GiB","battery":"90%",
+                         "temp":"44 C"})
+        w.add_image("/nonexistent/shot.png")
         w._on_new_chat(None); w._on_toggle_sidebar(None); w._on_toggle_sidebar(None)
+        if w._hero is None: res["errors"].append("hero missing after new chat")
     except Exception as exc: res["errors"].append("render: %r" % exc)
     GLib.timeout_add(1200, p3); return False
 def p3():

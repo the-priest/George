@@ -28,7 +28,7 @@ ICON_DIR="${PREFIX}/share/icons/hicolor/scalable/apps"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/george"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/george"
 
-REQUIRED_FILES=(george.py george_core.py george_tools.py george_voice.py)
+REQUIRED_FILES=(george.py george_core.py george_tools.py george_voice.py george_theme.py george_hud.py)
 OPTIONAL_FILES=(README.md george.svg install.sh)
 
 ASSUME_YES=0
@@ -67,13 +67,21 @@ ART
 
 # Prompts have to come from the terminal: when this script is piped from
 # curl, stdin IS the script, so a bare `read` eats the rest of it.
+#
+# `[ -r /dev/tty ]` is not enough. The device node exists and is mode
+# readable inside a service, a container or a cron job, but opening it
+# fails with ENXIO because there is no controlling terminal -- which
+# leaked a raw bash error on the way out of --uninstall. Try to open it
+# for real instead of trusting the permission bits.
+has_tty() { { : >/dev/tty; } 2>/dev/null; }
+
 ask() {
   local prompt="$1" reply=""
-  if [ "${ASSUME_YES}" = "1" ] || [ ! -r /dev/tty ]; then
+  if [ "${ASSUME_YES}" = "1" ] || ! has_tty; then
     return 0
   fi
-  printf '%s?%s %s [Y/n] ' "${C_ACC}" "${C_OFF}" "${prompt}" > /dev/tty
-  read -r reply < /dev/tty || reply=""
+  printf '%s?%s %s [Y/n] ' "${C_ACC}" "${C_OFF}" "${prompt}" > /dev/tty 2>/dev/null
+  read -r reply < /dev/tty 2>/dev/null || reply=""
   case "${reply}" in [nN]*) return 1 ;; *) return 0 ;; esac
 }
 
@@ -83,9 +91,9 @@ ask() {
 # run is not a trade worth making.
 ask_destructive() {
   local prompt="$1" reply=""
-  [ -r /dev/tty ] || { dim "no terminal to ask on - keeping it"; return 1; }
-  printf '%s?%s %s [y/N] ' "${C_WARN}" "${C_OFF}" "${prompt}" > /dev/tty
-  read -r reply < /dev/tty || reply=""
+  has_tty || { dim "no terminal to ask on - keeping it"; return 1; }
+  printf '%s?%s %s [y/N] ' "${C_WARN}" "${C_OFF}" "${prompt}" > /dev/tty 2>/dev/null
+  read -r reply < /dev/tty 2>/dev/null || reply=""
   case "${reply}" in [yY]*) return 0 ;; *) return 1 ;; esac
 }
 
@@ -151,12 +159,12 @@ pkg_install_soft() {
 
 core_packages() {
   case "${PKG}" in
-    pacman) echo "python python-gobject gtk4 libadwaita curl" ;;
+    pacman) echo "python python-gobject python-cairo gtk4 libadwaita curl" ;;
     apt)    echo "python3 python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 curl" ;;
-    dnf)    echo "python3 python3-gobject gtk4 libadwaita curl" ;;
-    zypper) echo "python3 python3-gobject gtk4 libadwaita curl" ;;
-    apk)    echo "python3 py3-gobject3 gtk4.0 libadwaita curl" ;;
-    xbps)   echo "python3 python3-gobject gtk4 libadwaita curl" ;;
+    dnf)    echo "python3 python3-gobject python3-cairo gtk4 libadwaita curl" ;;
+    zypper) echo "python3 python3-gobject python3-cairo gtk4 libadwaita curl" ;;
+    apk)    echo "python3 py3-gobject3 py3-cairo gtk4.0 libadwaita curl" ;;
+    xbps)   echo "python3 python3-gobject python3-cairo gtk4 libadwaita curl" ;;
     *)      echo "" ;;
   esac
 }
@@ -393,6 +401,12 @@ from gi.repository import Gtk, Adw
 PYCHK
   then
     ok "GTK4 + libadwaita bindings work"
+    if python3 -c "import cairo" >/dev/null 2>&1; then
+      ok "pycairo present - the animated HUD is live"
+    else
+      warn "pycairo is missing - the HUD falls back to plain widgets"
+      dim "  it is in the core package list above; re-run --deps-only"
+    fi
   else
     warn "python could not import GTK4/libadwaita"
     dim "George will not start until that is fixed. Try:"

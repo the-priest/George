@@ -14,6 +14,9 @@ command -v shellcheck >/dev/null && { shellcheck -S warning install.sh || fail=1
 step "logic + safety gate"
 python3 tests/test_logic.py || fail=1
 
+step "2.0 surface (theme, hud, config repair, new tools, watchdog)"
+python3 tests/test_v2.py || fail=1
+
 step "gate fuzz"
 python3 tests/test_gate_fuzz.py || fail=1
 

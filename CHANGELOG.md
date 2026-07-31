@@ -1,5 +1,27 @@
 # George changelog
 
+## 2.3.0
+
+- **He knows what he is running on.** The system prompt now carries a
+  real machine line - distro, kernel, arch, desktop and session type,
+  CPU, cores, RAM, GPU, package manager, shell, battery - instead of
+  just the distro name. He stops answering about "a Linux machine" in
+  the abstract and stops asking what distro you use.
+- **Read-only commands run without asking.** The allowlist went from 40
+  names to about 130: package queries for every distro, git read verbs,
+  service status, network inspection, hardware listings, checksums,
+  text tools. He can answer questions about the box without a click per
+  `uname -a`.
+- Widening that list meant closing the ways a read-only tool stops being
+  read-only. None of these auto-run any more, whatever the command name
+  says: anything containing a redirect, a command substitution or a
+  background `&`; anything run through sudo, doas, pkexec or su;
+  `sed -i`, `find -delete/-exec`, `awk system()`, `curl -o/-X/-d`,
+  `journalctl --vacuum`, `ip link set`, `nmcli up/down`, git verbs that
+  write, and `wget` at all - writing a file is its default, not a flag.
+- New `tests/test_autorun.py`: 76 commands that must run free and 78
+  that must ask, both directions pinned.
+
 ## 2.2.0 - eyes, ears and a voice
 
 - **He can see.** New `see` tool: grabs the screen and hands it to a

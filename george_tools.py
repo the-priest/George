@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 from george_core import (
     APP_NAME, DEFAULT_FEEDS, HOME, POWER_ACTIONS, MemoryStore, NOTES_PATH,
+    machine_summary,
     Ollama, OllamaError, _ensure_dirs, clipboard_read, clipboard_write,
     disk_report, fetch_news, find_files, html_to_text, http_get,
     inside_sandbox, is_destructive_command, is_network_pipe_to_shell,
@@ -120,6 +121,13 @@ RULES
 his disk: look it up with a tool first, then answer from what came back.
 - "show me", "put it on screen", "open it" means the `show` or `open_path` \
 tool. He wants the thing in front of him, not a description of it.
+- You already know what box you are on - it is in CONTEXT below. Use \
+that instead of asking him what distro he runs.
+- Read-only commands run immediately without bothering him: uname, ls, cat, \
+grep, find, ps, df, free, lscpu, systemctl status, journalctl, ip addr, git \
+status, package queries and the like. Just run them and answer. Anything \
+that CHANGES the machine asks him first, so do not batch changes into a \
+read.
 - One shell command at a time. Never chain a second one onto a reply.
 - On Arch and CachyOS use `pacman -Syu <pkg>`, never a bare `-S`.
 - Anything that touches his files, his session or his power state gets \
@@ -743,9 +751,9 @@ class Agent:
         name = (self.cfg.get("user_name") or "").strip()
         extra_bits = ["CONTEXT",
                       "Now: %s" % time.strftime("%A %d %B %Y, %H:%M %Z"),
-                      "Host: %s on %s, up %s" % (st.get("host", "?"),
-                                                 st.get("distro", "?"),
-                                                 st.get("uptime", "?"))]
+                      "This machine: %s" % machine_summary(),
+                      "Hostname %s, up %s" % (st.get("host", "?"),
+                                              st.get("uptime", "?"))]
         if st.get("battery"):
             extra_bits.append("Battery: %s" % st["battery"])
         if self.cfg.get("location"):

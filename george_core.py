@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = os.path.join(
@@ -567,41 +567,213 @@ def is_network_pipe_to_shell(command: str) -> bool:
     return bool(_PIPE_TO_SHELL.search(_normalise(command)))
 
 
+# Commands George may run on his own.
+#
+# This is an allowlist, and it is deliberately conservative about the
+# ways a "read-only" tool stops being read-only: a redirect writes a
+# file, a substitution runs a second command, and sudo turns anything
+# into a root action. Those are checked before the name is even looked
+# up. Anything not listed here still runs -- it just asks first.
+#
+# Things that LOOK harmless but are not auto-run on purpose:
+#   xdg-open / notify-send / playerctl / wpctl / pactl -- these act on
+#     his session rather than reporting on it, and there are proper
+#     tools for each of them with their own confirmation.
+#   sudo anything -- privilege escalation is never automatic, and a
+#     password prompt on a tty nobody is watching just hangs.
+
+def _flagless(args: List[str]) -> List[str]:
+    return [a for a in args[1:] if not a.startswith("-")]
+
+
+def _ok_systemctl(args: List[str]) -> bool:
+    verbs = ("status", "list-units", "list-unit-files", "list-timers",
+             "is-active", "is-enabled", "is-failed", "show", "cat",
+             "show-environment", "get-default")
+    return any(a in verbs for a in args[1:])
+
+
+def _ok_journalctl(args: List[str]) -> bool:
+    return not any(a.startswith("--vacuum") or a in ("--rotate", "--flush",
+                                                     "--sync")
+                   for a in args[1:])
+
+
+def _ok_pacman(args: List[str]) -> bool:
+    for a in args[1:]:
+        if a.startswith("-Q"):
+            return True
+        if a.startswith("-S") and ("i" in a[2:] or "s" in a[2:]):
+            return True   # -Si info, -Ss search
+    return False
+
+
+def _ok_pkg_query(args: List[str]) -> bool:
+    """dpkg/rpm/apt/dnf/flatpak/snap etc: query verbs only."""
+    reads = ("list", "search", "show", "info", "policy", "depends",
+             "rdepends", "-l", "-L", "-qa", "-qi", "-ql", "-q", "-s",
+             "--version", "repoquery", "provides", "which", "cache")
+    return any(a in reads or a.startswith("-q") or a.startswith("-l")
+               for a in args[1:])
+
+
+def _ok_ip(args: List[str]) -> bool:
+    writes = ("set", "add", "del", "delete", "flush", "change", "replace")
+    return not any(a in writes for a in args[1:])
+
+
+def _ok_nmcli(args: List[str]) -> bool:
+    writes = ("up", "down", "add", "delete", "modify", "edit", "connect",
+              "disconnect", "on", "off")
+    return not any(a in writes for a in args[1:])
+
+
+def _ok_find(args: List[str]) -> bool:
+    writes = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint",
+              "-fprintf", "-fls")
+    return not any(a in writes for a in args[1:])
+
+
+def _ok_sed(args: List[str]) -> bool:
+    return not any(a == "-i" or a.startswith("--in-place") or
+                   a.startswith("-i") and len(a) > 2 for a in args[1:])
+
+
+def _ok_awk(args: List[str]) -> bool:
+    body = " ".join(args[1:])
+    return "system(" not in body and ">" not in body and "print >" not in body
+
+
+def _ok_curl(args: List[str]) -> bool:
+    writes = ("-o", "-O", "--output", "--remote-name", "-T", "--upload-file",
+              "-d", "--data", "--data-binary", "--data-raw", "-F", "--form")
+    for a in args[1:]:
+        if a in writes or a.startswith("--output"):
+            return False
+        if a in ("-X", "--request"):
+            return False
+    return True
+
+
+def _ok_ping(args: List[str]) -> bool:
+    if any(a in ("-f", "--flood") for a in args[1:]):
+        return False
+    return any(a in ("-c", "-w", "-W") for a in args[1:])   # bounded only
+
+
+def _ok_mount(args: List[str]) -> bool:
+    return not _flagless(args)          # bare `mount` lists; args mount
+
+
+def _ok_git(args: List[str]) -> bool:
+    reads = ("status", "log", "diff", "show", "branch", "remote", "config",
+             "describe", "blame", "shortlog", "rev-parse", "ls-files",
+             "ls-remote", "tag", "stash")
+    subs = _flagless(args)
+    if not subs:
+        return False
+    if subs[0] == "stash" and len(subs) > 1 and subs[1] != "list":
+        return False
+    if subs[0] == "config" and any(not a.startswith("-") for a in subs[1:]) \
+            and "--get" not in args:
+        return False                    # `git config x y` writes
+    if subs[0] == "tag" and len(subs) > 1:
+        return False
+    if subs[0] == "branch" and len(subs) > 1:
+        return False
+    return subs[0] in reads
+
+
+# name -> extra check, or None when the command is safe on its own
+READ_ONLY: Dict[str, Optional[Callable[[List[str]], bool]]] = {
+    # files and text
+    "ls": None, "cat": None, "head": None, "tail": None, "wc": None,
+    "grep": None, "egrep": None, "fgrep": None, "rg": None, "ag": None,
+    "stat": None, "file": None, "tree": None, "realpath": None,
+    "readlink": None, "basename": None, "dirname": None, "dircolors": None,
+    "nl": None, "tac": None, "cut": None, "sort": None, "uniq": None,
+    "column": None, "paste": None, "comm": None, "diff": None, "cmp": None,
+    "strings": None, "md5sum": None, "sha1sum": None, "sha256sum": None,
+    "base64": None, "od": None, "xxd": None, "jq": None, "yq": None,
+    "find": _ok_find, "locate": None, "sed": _ok_sed, "awk": _ok_awk,
+    "gawk": _ok_awk, "mawk": _ok_awk,
+    # system facts
+    "uname": None, "hostname": None, "hostnamectl": None, "arch": None,
+    "whoami": None, "id": None, "groups": None, "who": None, "w": None,
+    "users": None, "last": None, "logname": None, "getent": None,
+    "date": None, "cal": None, "uptime": None, "timedatectl": None,
+    "locale": None, "printenv": None, "env": None, "pwd": None,
+    "echo": None, "printf": None, "seq": None, "test": None, "true": None,
+    "nproc": None, "lscpu": None, "lsblk": None, "lsusb": None,
+    "lspci": None, "lsmod": None, "lsof": None, "lshw": None,
+    "dmidecode": None, "inxi": None, "hwinfo": None, "sensors": None,
+    "acpi": None, "upower": None, "free": None, "vmstat": None,
+    "iostat": None, "mpstat": None, "df": None, "du": None,
+    "findmnt": None, "blkid": None, "smartctl": None, "mount": _ok_mount,
+    "lsb_release": None, "neofetch": None, "fastfetch": None,
+    "screenfetch": None, "nvidia-smi": None, "rocm-smi": None,
+    "glxinfo": None, "vulkaninfo": None, "xrandr": None, "xdpyinfo": None,
+    "wmctrl": None, "loginctl": None, "ulimit": None,
+    # processes and services
+    "ps": None, "pstree": None, "pgrep": None, "pidof": None, "top": None,
+    "systemctl": _ok_systemctl, "journalctl": _ok_journalctl,
+    "dmesg": None, "rc-status": None,
+    # network, read side only
+    "ip": _ok_ip, "ss": None, "netstat": None, "ifconfig": None,
+    "iwgetid": None, "iwconfig": None, "rfkill": None, "route": None,
+    "arp": None, "dig": None, "host": None, "nslookup": None,
+    "nmcli": _ok_nmcli, "ping": _ok_ping, "curl": _ok_curl,
+    # wget is not here on purpose: writing a file is its default
+    # behaviour, not an opt-in flag. open_page reads the web instead.
+    # toolchain versions and package queries
+    "which": None, "whereis": None, "type": None, "command": None,
+    "ldd": None, "pkg-config": None, "python": None, "python3": None,
+    "pip": _ok_pkg_query, "pip3": _ok_pkg_query, "node": None, "npm":
+        _ok_pkg_query, "git": _ok_git, "ollama": _ok_pkg_query,
+    "pacman": _ok_pacman, "dpkg": _ok_pkg_query, "dpkg-query":
+        _ok_pkg_query, "rpm": _ok_pkg_query, "apt": _ok_pkg_query,
+    "apt-cache": None, "dnf": _ok_pkg_query, "zypper": _ok_pkg_query,
+    "apk": _ok_pkg_query, "xbps-query": None, "flatpak": _ok_pkg_query,
+    "snap": _ok_pkg_query, "pamac": _ok_pkg_query,
+}
+
+# If any of these appear anywhere in the command it is not auto-run,
+# whatever the command name says. A redirect writes; a substitution runs
+# something this gate never saw; `&` detaches it from the timeout.
+_NO_AUTORUN_CHARS = (">", "<", "$(", "`", "${", "&")
+
+_PRIV = ("sudo", "doas", "pkexec", "su", "runuser", "setpriv")
+
+
 def command_needs_confirmation(command: str, cfg: Dict[str, Any]) -> bool:
-    """Read-only inspection runs free; everything else asks, unless the
-    operator has flipped auto-run on."""
+    """False = George may run it himself.
+
+    Read-only inspection runs free so he can actually answer questions
+    about the machine without a click for every `uname -a`. Everything
+    else asks, unless the operator has flipped auto-run on.
+    """
     if cfg.get("auto_run_commands"):
         return False
     s = _normalise(command)
+    if any(ch in s for ch in _NO_AUTORUN_CHARS):
+        return True
     subs = _split_subcommands(s)
-    safe = {
-        "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "stat",
-        "file", "du", "df", "free", "uptime", "uname", "whoami", "id",
-        "date", "hostname", "ps", "top", "pgrep", "which", "whereis",
-        "echo", "printf", "pwd", "env", "lsblk", "lscpu", "lsusb", "lspci",
-        "ip", "sensors", "systemctl", "journalctl", "pacman", "neofetch",
-        "fastfetch", "nvidia-smi", "sort", "uniq", "cut", "awk", "sed",
-        "jq", "tree", "mount", "nmcli", "bluetoothctl", "playerctl",
-        "wpctl", "pactl", "xdg-open", "notify-send", "curl", "ping",
-    }
+    if not subs:
+        return True
     for sub in subs:
         args = _argv(sub)
         if not args:
             return True
+        if any(_base(a) in _PRIV for a in args):
+            return True                 # never escalate on its own
         args = _strip_wrappers(args)
         if not args:
             return True
         base = _base(args[0])
-        if base not in safe:
+        if base not in READ_ONLY:
             return True
-        if base == "systemctl" and not any(
-                a in ("status", "list-units", "list-unit-files", "is-active",
-                      "is-enabled", "show", "cat") for a in args[1:]):
-            return True
-        if base == "pacman" and not any(a.startswith("-Q") or a.startswith("-S")
-                                        and "i" in a for a in args[1:]):
-            return True
-        if base == "sed" and "-i" in args:
+        check = READ_ONLY[base]
+        if check is not None and not check(args):
             return True
     return False
 
@@ -1168,6 +1340,38 @@ class CpuMeter:
 _cpu_meter = CpuMeter()
 
 
+def machine_summary() -> str:
+    """One dense line about the box, for the system prompt.
+
+    He was answering questions about "a Linux machine" in the abstract
+    because the prompt only carried the distro name. Package manager and
+    session type in particular change what the right answer actually is.
+    """
+    st = system_status()
+    bits = ["%s on %s" % (st.get("distro", "Linux"), st.get("arch", "?")),
+            "kernel %s" % st.get("kernel", "?")]
+    if st.get("desktop"):
+        bits.append("%s%s" % (st["desktop"],
+                              "/" + st["session"] if st.get("session")
+                              else ""))
+    if st.get("cpu_model"):
+        bits.append(st["cpu_model"])
+    if st.get("cores"):
+        bits.append("%s cores" % st["cores"])
+    if st.get("memory"):
+        bits.append("%s ram" % st["memory"].split("(")[0].strip())
+    if st.get("gpu"):
+        bits.append("gpu " + st["gpu"])
+    pkg = detect_pkg_mgr()
+    if pkg:
+        bits.append("package manager: %s" % pkg)
+    if st.get("shell"):
+        bits.append("shell %s" % st["shell"])
+    if st.get("battery"):
+        bits.append("battery %s" % st["battery"])
+    return ", ".join(bits)
+
+
 def system_status() -> Dict[str, str]:
     st: Dict[str, str] = {}
     uname = os.uname()
@@ -1187,6 +1391,35 @@ def system_status() -> Dict[str, str]:
     except (ValueError, IndexError):
         st["uptime"] = "?"
 
+    st["kernel"] = uname.release
+    st["arch"] = uname.machine
+    desktop = (os.environ.get("XDG_CURRENT_DESKTOP")
+               or os.environ.get("DESKTOP_SESSION") or "")
+    if desktop:
+        st["desktop"] = desktop
+    session = os.environ.get("XDG_SESSION_TYPE", "")
+    if session:
+        st["session"] = session          # x11 or wayland changes advice
+    shell = os.environ.get("SHELL", "")
+    if shell:
+        st["shell"] = os.path.basename(shell)
+    cpu_model = ""
+    for line in _read_first("/proc/cpuinfo", "").split("\n"):
+        if line.lower().startswith("model name"):
+            cpu_model = line.split(":", 1)[-1].strip()
+            break
+    if cpu_model:
+        st["cpu_model"] = cpu_model
+    gpu = ""
+    if shutil.which("lspci"):
+        rc, out = run_shell("lspci -mm 2>/dev/null | grep -iE 'vga|3d|display'",
+                            timeout=6)
+        if rc == 0 and out.strip():
+            first = out.strip().split("\n")[0]
+            parts = [p.strip('"') for p in first.split('" "')]
+            gpu = " ".join(parts[2:4]) if len(parts) > 3 else first[:60]
+    if gpu:
+        st["gpu"] = gpu.strip()[:70]
     st["load"] = " ".join(_read_first("/proc/loadavg", "").split()[:3])
     cpu = _cpu_meter.sample()
     st["cpu"] = "%d%%" % int(round(cpu))

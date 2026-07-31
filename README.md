@@ -146,6 +146,16 @@ sparkline, the weather, the engine state, headlines, and saved chats.
 Accent colour, density, font scale and animation are all in
 Settings > Interface. Turning animation off stops every cairo timer.
 
+## Commands
+
+Read-only inspection runs on its own - `uname`, `ls`, `cat`, `grep`,
+`ps`, `df`, `systemctl status`, `git status`, package queries and around
+130 others - so asking about your machine does not mean clicking through
+a dialog per command.
+
+Anything that changes the machine asks first. Destructive commands are
+refused outright with no override, and that is not a setting.
+
 ## Eyes
 
 `see` reads your screen with a local vision model. Ambient mode (the

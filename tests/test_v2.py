@@ -244,6 +244,21 @@ for mode, want in (("off", False), ("on", True), ("auto", None)):
         eq("thinking %s" % mode, seen.get("think"), want)
     ok("think is top level (%s)" % mode, "think" not in seen.get("options", {}))
 
+# ------------------------------------------------- knows its own machine
+summary = C.machine_summary()
+ok("summary is a real line", len(summary) > 20, summary)
+for word in ("kernel", "package manager"):
+    ok("summary mentions %s" % word, word in summary, summary)
+st = C.system_status()
+for key in ("kernel", "arch", "distro", "host", "uptime"):
+    ok("system_status has %s" % key, st.get(key))
+agent_probe = X.Agent(C.coerce_config({}), C.MemoryStore(), _Stub.tts)
+msg = agent_probe.system_message()
+ok("prompt carries the machine", "This machine:" in msg)
+ok("prompt names the distro", st.get("distro", "zzz").split()[0] in msg)
+ok("prompt says read-only runs free", "Read-only commands run immediately"
+   in msg)
+
 # -------------------------------------------------------------- personas
 for persona in ("jarvis", "plain", "blunt"):
     agent.cfg["persona"] = persona

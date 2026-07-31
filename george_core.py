@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = os.path.join(
@@ -84,6 +84,16 @@ DEFAULTS: Dict[str, Any] = {
     "allow_writes": False,           # file writes outside the notes file
     "sandbox_root": HOME,
 
+    "vision_model": "",              # blank = whatever vision model is pulled
+    "vision_timeout": 120,
+    "watch_enabled": False,          # ambient mode is OFF until he says so
+    "watch_interval": 120,           # seconds between looks
+    "watch_min_gap": 240,            # seconds between things he hears
+    "watch_max_per_hour": 8,
+    "watch_mode": "advice",          # advice | banter | quiet
+    "watch_speak": True,
+    "sounds": True,
+
     "persona": "jarvis",             # jarvis | plain | blunt
     "accent": "cyan",                # cyan | amber | violet | green | red
     "ui_density": "comfortable",     # comfortable | compact
@@ -119,12 +129,17 @@ LIMITS: Dict[str, Tuple[float, float]] = {
     "chat_retention_hours": (0, 8760),
     "chat_max_sessions": (5, 500),
     "news_count": (3, 40),
+    "vision_timeout": (15, 900),
+    "watch_interval": (20, 3600),
+    "watch_min_gap": (0, 7200),
+    "watch_max_per_hour": (1, 120),
 }
 
 CHOICES: Dict[str, Tuple[str, ...]] = {
     "thinking": ("auto", "off", "on"),
     "voice_engine": ("auto", "piper", "espeak", "none"),
     "persona": ("jarvis", "plain", "blunt"),
+    "watch_mode": ("advice", "banter", "quiet"),
     "accent": ("cyan", "amber", "violet", "green", "red", "white"),
     "ui_density": ("comfortable", "compact"),
 }

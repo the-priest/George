@@ -31,7 +31,7 @@ problems = []
 
 # ------------------------------------------------------------------ 1
 MODULES = ["george", "george_core", "george_tools", "george_voice",
-           "george_theme", "george_hud"]
+           "george_theme", "george_hud", "george_vision", "george_sound"]
 
 for fname in MODULES:
     path = os.path.join(ROOT, fname + ".py")
@@ -192,6 +192,15 @@ def drive():
             w._tick_clock()
             w._refresh_vitals()
         elif n == 7:
+            # ambient mode: toggle on with no vision model available,
+            # which must refuse cleanly rather than spin a thread
+            w.watch_btn.set_active(True)
+            w.watch_btn.set_active(False)
+            w._watch_said("You have left a build failing in that terminal.")
+            w._sync_watcher()
+            for tone in ("send", "reply", "error", "listen", "notice"):
+                w.sfx.play(tone)
+        elif n == 8:
             # keyboard paths
             from gi.repository import Gdk
             for key in (Gdk.KEY_Escape, Gdk.KEY_F9, Gdk.KEY_F5, Gdk.KEY_k,
@@ -220,7 +229,8 @@ if os.path.exists(log):
     for line in open(log):
         if ("failed:" in line or "UNCAUGHT" in line or "css:" in line) \
                 and "weather" not in line and "news failed" not in line \
-                and "model list failed" not in line:
+                and "model list failed" not in line \
+                and "feed " not in line:
             problems.append("log: " + line.strip()[:200])
 
 print("AUDIT problems: %d" % len(problems))

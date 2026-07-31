@@ -38,11 +38,13 @@ from george_core import (
     NOTES_PATH, VERSION, ChatStore, MemoryStore, ModelManager, Ollama,
     OllamaSupervisor, clipboard_write, fetch_news, install_hint,
     install_crash_handlers, load_config, log, open_in_browser, reasoning_of,
-    save_config, system_status, weather,
+    save_config, system_status, take_screenshot, weather,
 )
 from george_theme import FALLBACK_CSS, build_css, palette, rgb
 from george_tools import Agent, strip_action_json
 from george_voice import SpeechToText, TextToSpeech
+from george_vision import VISION_MODELS, Eyes, Watcher
+from george_sound import Sounds
 import george_hud as hud
 
 
@@ -319,6 +321,11 @@ class GeorgeWindow(Adw.ApplicationWindow):
         self.stt = SpeechToText(cfg)
         self.agent = Agent(cfg, self.memory, self.tts)
         self.confirmer = Confirmer(self)
+        self.sfx = Sounds(cfg)
+        self.sfx.prebuild()
+        self.eyes = Eyes(cfg)
+        self.watcher = Watcher(cfg, self.eyes, self._grab_for_watch,
+                               lambda text: idle(self._watch_said, text))
 
         self.session_id = "s%d" % int(time.time())
         self._live_raw = ""
@@ -464,6 +471,14 @@ class GeorgeWindow(Adw.ApplicationWindow):
         self.status_lbl = _label("STARTING", "status-text", wrap=False)
         pill.append(self.status_lbl)
         hb.pack_start(pill)
+
+        self.watch_btn = Gtk.ToggleButton()
+        self.watch_btn.set_icon_name("view-reveal-symbolic")
+        self.watch_btn.add_css_class("flat")
+        self.watch_btn.set_tooltip_text(
+            "Let George watch your screen and chip in  (Ctrl+W)")
+        self.watch_btn.connect("toggled", self._on_watch_toggle)
+        hb.pack_end(self.watch_btn)
 
         self.mic_btn = _icon_button("audio-input-microphone-symbolic",
                                     "Push to talk  (Ctrl+M)")
@@ -839,9 +854,11 @@ class GeorgeWindow(Adw.ApplicationWindow):
         self._live_raw = ""
         self.think_lbl.set_text("")
         self.feed_lbl.set_text("done")
+        self.sfx.play("reply")
         self._save_session()
 
     def _ui_error(self, text: str) -> None:
+        self.sfx.play("error")
         self.add_note("[%s]" % text, "err")
         self.feed_lbl.set_text("error")
         self._set_state("down" if "ollama" in text.lower() else "idle")
@@ -873,16 +890,20 @@ class GeorgeWindow(Adw.ApplicationWindow):
     # ---- one place that owns "what is George doing right now" --------
     def _set_state(self, state: str) -> None:
         p = palette(self.cfg)
+        if state == "idle" and self.watcher.running:
+            state = "watching"
         labels = {"idle": "READY", "busy": "THINKING", "speaking": "SPEAKING",
-                  "listening": "LISTENING", "down": "ENGINE DOWN"}
+                  "listening": "LISTENING", "down": "ENGINE DOWN",
+                  "watching": "WATCHING"}
         colours = {"idle": rgb(p["ok"]), "busy": rgb(p["accent"]),
                    "speaking": rgb(p["accent"]), "listening": rgb(p["warn"]),
-                   "down": rgb(p["bad"])}
-        self.core.set_state(state)
+                   "down": rgb(p["bad"]), "watching": rgb(p["accent_light"])}
+        self.core.set_state("listening" if state == "watching" else state)
         self.core.set_caption(labels.get(state, "READY"))
         self.status_lbl.set_text(labels.get(state, "READY"))
         self.dot.set_colour(colours.get(state, rgb(p["ok"])),
-                            pulsing=state in ("busy", "listening", "speaking"))
+                            pulsing=state in ("busy", "listening", "speaking",
+                                              "watching"))
 
     # =================================================================
     # SENDING
@@ -923,6 +944,9 @@ class GeorgeWindow(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_m, Gdk.KEY_M):
             self._on_mic(None)
             return True
+        if keyval in (Gdk.KEY_w, Gdk.KEY_W):
+            self.watch_btn.set_active(not self.watch_btn.get_active())
+            return True
         if keyval in (Gdk.KEY_h, Gdk.KEY_H):
             self._open_history()
             return True
@@ -934,6 +958,7 @@ class GeorgeWindow(Adw.ApplicationWindow):
     def _on_send_clicked(self, _btn) -> None:
         if self.agent.busy:
             self.agent.stop()
+            self.sfx.play("stop")
             self.feed_lbl.set_text("stopped")
         else:
             self._send()
@@ -949,6 +974,7 @@ class GeorgeWindow(Adw.ApplicationWindow):
             return
         buf.set_text("")
         self.tts.stop()
+        self.sfx.play("send")
         self.add_user_bubble(text)
         self._stick_bottom = True
 
@@ -994,6 +1020,7 @@ class GeorgeWindow(Adw.ApplicationWindow):
         if not self._recording:
             if self.stt.start():
                 self._recording = True
+                self.sfx.play("listen")
                 self.mic_btn.add_css_class("mic-live")
                 self._set_state("listening")
                 self.feed_lbl.set_text("listening... click the mic to stop")
@@ -1015,6 +1042,93 @@ class GeorgeWindow(Adw.ApplicationWindow):
             return
         self.feed_lbl.set_text("ready")
         self._send(text)
+
+    # =================================================================
+    # AMBIENT MODE
+    #
+    # Off unless he turns it on, and while it is on the header button
+    # stays lit and the core says WATCHING. Nobody should ever have to
+    # wonder whether this thing is looking.
+    # =================================================================
+    def _grab_for_watch(self) -> str:
+        ok, path = take_screenshot()
+        return path if ok else ""
+
+    def _on_watch_toggle(self, btn: Gtk.ToggleButton) -> None:
+        if btn.get_active():
+            if not self.eyes.available():
+                btn.set_active(False)
+                self.toast("no vision model - pull one in Settings > Eyes")
+                self._open_settings()
+                return
+            if not self.watcher.start():
+                btn.set_active(False)
+                self.toast("could not start watching")
+                return
+            self.watch_btn.add_css_class("mic-live")
+            self.cfg["watch_enabled"] = True
+            self.toast("watching your screen - %s mode"
+                       % self.cfg.get("watch_mode", "advice"))
+        else:
+            self.watcher.stop()
+            self.watch_btn.remove_css_class("mic-live")
+            self.cfg["watch_enabled"] = False
+            self.toast("stopped watching")
+        save_config(self.cfg)
+        self._set_state("idle" if self._engine_ok else "down")
+
+    def _pull_model(self, name: str) -> None:
+        """Pull from the Eyes page without making him find the Models
+        window."""
+        self.toast("pulling %s ..." % name)
+
+        def work() -> None:
+            try:
+                _ok, msg = self.models.pull(name, lambda m, f: None,
+                                            threading.Event())
+            except Exception as exc:
+                msg = "pull failed: %s" % exc
+            idle(self.toast, msg)
+        threading.Thread(target=work, daemon=True,
+                         name="george-pull").start()
+
+    def _sync_watcher(self) -> None:
+        want = bool(self.cfg.get("watch_enabled"))
+        if want and not self.watcher.running:
+            if self.eyes.available() and self.watcher.start():
+                self.watch_btn.set_active(True)
+                self.watch_btn.add_css_class("mic-live")
+            else:
+                self.cfg["watch_enabled"] = False
+        elif not want and self.watcher.running:
+            self.watcher.stop()
+            self.watch_btn.set_active(False)
+            self.watch_btn.remove_css_class("mic-live")
+
+    def _watch_said(self, text: str) -> None:
+        """A remark from ambient mode. Visually distinct from an answer,
+        because he did not ask for it."""
+        self.sfx.play("notice")
+        box = _box(spacing=6)
+        box.add_css_class("bubble-ai")
+        box.add_css_class("bubble-watch")
+        head = _box(horizontal=True, spacing=8)
+        av = _label("!", "avatar", wrap=False, xalign=0.5)
+        av.set_size_request(26, 26)
+        av.set_valign(Gtk.Align.START)
+        head.append(av)
+        tag = _label("GEORGE NOTICED", "hud-title", wrap=False)
+        tag.set_hexpand(True)
+        head.append(tag)
+        head.append(_label(time.strftime("%H:%M"), "stamp", wrap=False))
+        box.append(head)
+        lbl = _label(text, "bubble-text", selectable=True)
+        lbl.set_max_width_chars(80)
+        box.append(lbl)
+        self._row(box, Gtk.Align.START)
+        if self.cfg.get("watch_speak", True) and \
+                self.cfg.get("voice_enabled", True):
+            self.tts.speak(text)
 
     # =================================================================
     # HUD REFRESH
@@ -1187,6 +1301,7 @@ class GeorgeWindow(Adw.ApplicationWindow):
                      "ollama pull %s" % (model, model), "err")
             idle(self._ui_step, "ready")
         idle(self._set_subtitle)
+        idle(self._sync_watcher)
         self._async_weather()
         self._async_news("")
         if self.cfg.get("greet_on_start", True):
@@ -1618,6 +1733,69 @@ class GeorgeWindow(Adw.ApplicationWindow):
         page.add(grp)
         win.add(page)
 
+        # --- eyes page
+        page = Adw.PreferencesPage(title="Eyes",
+                                   icon_name="view-reveal-symbolic")
+        installed_vision = self.eyes.installed()
+        grp = Adw.PreferencesGroup(
+            title="Screen vision",
+            description=("Screenshots go to your local ollama and nowhere "
+                         "else. Nothing is uploaded and nothing is kept - "
+                         "the image is deleted the moment it is read."))
+        opts = ["(auto)"] + installed_vision
+        cur_v = str(self.cfg.get("vision_model", ""))
+        cr = Adw.ComboRow(title="Vision model")
+        cr.set_model(Gtk.StringList.new(opts))
+        cr.set_selected(opts.index(cur_v) if cur_v in opts else 0)
+        entries["vision_model"] = cr
+        grp.add(cr)
+        if not installed_vision:
+            r = Adw.ActionRow(title="Nothing pulled yet")
+            r.set_subtitle("Grab one below, then reopen this window")
+            grp.add(r)
+        page.add(grp)
+
+        grp = Adw.PreferencesGroup(
+            title="Pull a vision model",
+            description="Smaller is faster. moondream is the laptop pick.")
+        for name, size, blurb in VISION_MODELS:
+            r = Adw.ActionRow(title=name)
+            r.set_subtitle("%s  -  %s" % (size, blurb))
+            if name in installed_vision:
+                tick = Gtk.Label(label="installed")
+                tick.add_css_class("ok")
+                tick.set_valign(Gtk.Align.CENTER)
+                r.add_suffix(tick)
+            else:
+                b = Gtk.Button(label="Pull")
+                b.add_css_class("chip")
+                b.set_valign(Gtk.Align.CENTER)
+                b.connect("clicked", lambda *_a, n=name: self._pull_model(n))
+                r.add_suffix(b)
+            grp.add(r)
+        page.add(grp)
+
+        grp = Adw.PreferencesGroup(
+            title="Ambient mode",
+            description=("George looks at your screen every so often and "
+                         "chips in. Off by default; while it is on the "
+                         "header button stays lit and the core says "
+                         "WATCHING."))
+        row(grp, "Watch my screen", "same as the header button (Ctrl+W)",
+            switch_for("watch_enabled"))
+        grp.add(combo_for("watch_mode", ["advice", "banter", "quiet"],
+                          "What he chips in with"))
+        row(grp, "Say it out loud", "as well as showing it",
+            switch_for("watch_speak"))
+        row(grp, "Look every (seconds)", "",
+            spin_for("watch_interval", 20, 3600, 10))
+        row(grp, "Leave at least (seconds) between remarks", "",
+            spin_for("watch_min_gap", 0, 7200, 30))
+        row(grp, "Most remarks per hour", "",
+            spin_for("watch_max_per_hour", 1, 120, 1))
+        page.add(grp)
+        win.add(page)
+
         # --- interface page
         page = Adw.PreferencesPage(title="Interface",
                                    icon_name="preferences-desktop-symbolic")
@@ -1627,6 +1805,10 @@ class GeorgeWindow(Adw.ApplicationWindow):
         grp.add(combo_for("ui_density", ["comfortable", "compact"], "Density"))
         row(grp, "Animate the HUD", "off saves a little power",
             switch_for("animations"))
+        row(grp, "Interface sounds",
+            "short blips on send, reply and errors" if self.sfx.available
+            else "no audio player found (pw-play, paplay or aplay)",
+            switch_for("sounds"))
         row(grp, "Font scale", "", spin_for("font_scale", 0.75, 2.0, 0.05, 2))
         row(grp, "Messages kept on screen",
             "older rows are dropped to save RAM",
@@ -1669,7 +1851,8 @@ class GeorgeWindow(Adw.ApplicationWindow):
                 elif isinstance(widget, Adw.ComboRow):
                     item = widget.get_selected_item()
                     if item is not None:
-                        self.cfg[key] = item.get_string()
+                        value = item.get_string()
+                        self.cfg[key] = "" if value == "(auto)" else value
             buf = feeds_view.get_buffer()
             raw = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
             feeds = []
@@ -1681,6 +1864,7 @@ class GeorgeWindow(Adw.ApplicationWindow):
             if feeds:
                 self.cfg["feeds"] = feeds
             save_config(self.cfg)
+            self._sync_watcher()
             self.tts.reconfigure()
             self.reload_css()
             self._set_subtitle()
@@ -1801,6 +1985,7 @@ class GeorgeApp(Adw.Application):
         self._shut = True
         try:
             if self.win is not None:
+                self.win.watcher.stop()
                 self.win.tts.stop()
                 self.win._save_session()
                 self.win.agent.stop()

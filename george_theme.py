@@ -296,6 +296,12 @@ headerbar button:active, headerbar button:checked, .pill-btn:checked {
     padding: 12px 16px;
 }
 
+.bubble-watch {
+    background-image: linear-gradient(to bottom, %(accent_ghost)s,
+                                      %(plate)s);
+    border: 1px solid %(accent_deep)s;
+}
+
 .bubble-text { font-size: %(f)dpx; color: %(text)s; }
 .bubble-user .bubble-text { color: #ffffff; }
 

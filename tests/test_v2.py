@@ -263,6 +263,96 @@ ok("no empty sentences", all(s.strip() for s in
                              V.split_sentences(V.clean_for_speech(
                                  "One. Two.  Three!"))))
 
+# --------------------------------------------------------- eyes + sound
+import george_vision as VIS                                   # noqa: E402
+import george_sound as SND                                     # noqa: E402
+
+snd = SND.Sounds(C.coerce_config({}))
+for tone in SND.TONES:
+    path = snd._path(tone)
+    ok("tone rendered: %s" % tone, path and os.path.getsize(path) > 1000)
+snd.cfg["sounds"] = False
+snd.play("send")                       # must be a no-op, never raise
+
+eyes = VIS.Eyes(C.coerce_config({"ollama_url": "http://127.0.0.1:1"}))
+ok("no model -> readable message", eyes.look("/nope").startswith("cannot see"))
+ok("not available with no ollama", not eyes.available())
+eq("overlap identical", VIS._overlap("a book about birds",
+                                     "a book about birds"), 1.0)
+eq("overlap nothing", VIS._overlap("terminal build failing",
+                                   "photographs of horses"), 0.0)
+
+# the watcher's restraint is the whole feature, so it gets tested hard
+class _FakeEyes:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = 0
+
+    def available(self):
+        return True
+
+    def look(self, path, prompt="", timeout=0):
+        self.calls += 1
+        return self.replies.pop(0) if self.replies else "NOTHING"
+
+
+said = []
+shots = []
+
+
+def _grab():
+    path = os.path.join(tmp, "shot%d.png" % len(shots))
+    with open(path, "wb") as fh:
+        fh.write(b"\x89PNG fake")
+    shots.append(path)
+    return path
+
+
+wcfg = C.coerce_config({"watch_min_gap": 0, "watch_max_per_hour": 100})
+w = VIS.Watcher(wcfg, _FakeEyes(["You left a build failing in that terminal.",
+                                 "NOTHING",
+                                 "You left a build failing in that terminal.",
+                                 "  ",
+                                 "cannot see: no vision model is pulled",
+                                 "Different thing entirely now, a browser."]),
+                _grab, said.append)
+eq("first remark speaks", bool(w.tick()), True)
+eq("NOTHING stays quiet", w.tick(), "")
+eq("repeat stays quiet", w.tick(), "")
+eq("blank stays quiet", w.tick(), "")
+eq("vision error stays quiet", w.tick(), "")
+ok("a genuinely new thing speaks", bool(w.tick()))
+eq("only the real remarks were said", len(said), 2)
+ok("screenshots are deleted after reading",
+   not any(os.path.exists(p) for p in shots), str(shots))
+
+# rate limiting
+wcfg2 = C.coerce_config({"watch_min_gap": 600, "watch_max_per_hour": 2})
+w2 = VIS.Watcher(wcfg2, _FakeEyes(["one thing", "another thing"]),
+                 _grab, said.append)
+ok("first is allowed", w2.allowed_now())
+w2.tick()
+ok("min gap blocks the next one", not w2.allowed_now())
+w2._last_at = 0                        # pretend the gap elapsed
+ok("allowed again after the gap", w2.allowed_now())
+w2._hour = [time.time(), time.time()]
+ok("hourly cap blocks it", not w2.allowed_now())
+
+# a watcher with no vision model must refuse to start rather than spin
+class _BlindEyes(_FakeEyes):
+    def available(self):
+        return False
+
+
+w3 = VIS.Watcher(C.coerce_config({}), _BlindEyes([]), _grab, said.append)
+eq("blind watcher will not start", w3.start(), False)
+ok("blind watcher is not running", not w3.running)
+
+# ambient mode must be off out of the box
+eq("watch is off by default", C.DEFAULTS["watch_enabled"], False)
+ok("see tool registered", "see" in X.TOOLS)
+eq("look alias", X._canon_tool("look"), "see")
+
 # ------------------------------------------------------------ markdown/UI
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:

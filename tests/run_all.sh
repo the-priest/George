@@ -26,6 +26,9 @@ python3 tests/test_agent_loop.py || fail=1
 step "ollama lifecycle"
 python3 tests/test_lifecycle.py || fail=1
 
+step "audit (cross-module names, swallowed exceptions)"
+xvfb-run -a python3 tests/test_audit.py || fail=1
+
 step "gtk ui (needs xvfb-run)"
 if command -v xvfb-run >/dev/null; then
   xvfb-run -a python3 tests/test_ui.py || fail=1

@@ -146,6 +146,15 @@ sparkline, the weather, the engine state, headlines, and saved chats.
 Accent colour, density, font scale and animation are all in
 Settings > Interface. Turning animation off stops every cairo timer.
 
+## Eyes
+
+`see` reads your screen with a local vision model. Ambient mode (the
+header button, or Ctrl+W) lets him watch and chip in on his own - off
+until you turn it on, and obvious while it is running.
+
+Screenshots go to the ollama on your machine, are never uploaded, and
+are deleted as soon as they have been read.
+
 ## Keyboard
 
 | key | does |
@@ -160,6 +169,7 @@ Settings > Interface. Turning animation off stops every cairo timer.
 | Ctrl+, | settings |
 | F5 | refresh news |
 | F9 | toggle the HUD |
+| Ctrl+W | let George watch the screen |
 
 ## Personas
 

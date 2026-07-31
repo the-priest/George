@@ -1,5 +1,32 @@
 # George changelog
 
+## 2.2.0 - eyes, ears and a voice
+
+- **He can see.** New `see` tool: grabs the screen and hands it to a
+  local vision model. The image goes to your own ollama, is never
+  uploaded, and is deleted the moment it has been read.
+- **Ambient mode.** Header button (Ctrl+W) or Settings > Eyes. George
+  looks every couple of minutes and chips in - `advice`, `banter` or
+  `quiet` (urgent things only). Off by default, and while it is on the
+  button stays lit and the core reads WATCHING, so it is never
+  ambiguous whether he is looking.
+  Restraint is the design: a remark has to clear three bars - the model
+  has something to say at all, it is not repeating itself, and the rate
+  caps allow it. Defaults to at most one remark every 4 minutes, 8 an
+  hour.
+- **A real voice, installed for you.** install.sh now fetches piper and
+  an `en_GB-alan-medium` voice instead of leaving you on espeak.
+  `--voice <name>` for any other piper voice, `--no-voice` to skip.
+- **The mic works out of the box.** install.sh installs whisper.cpp and
+  the base.en model, so push-to-talk works after a fresh install.
+- **A vision model too** - `moondream` by default (1.7 GB, quick on a
+  laptop). `--vision <model>` or `--no-vision`.
+- **Sound.** Short tones on send, reply, listen, stop, error and when he
+  notices something. Synthesised at runtime from the stdlib - no audio
+  files shipped. Toggle in Settings > Interface.
+- Unprompted remarks get their own bubble style so they never look like
+  an answer to something you asked.
+
 ## 2.1.0
 
 - **Fixed the icon.** The app registers as `com.thepriest.george` but the

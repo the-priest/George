@@ -59,6 +59,7 @@ volume       {"action": "up"|"down"|"mute"|"get", "level": int}
 power        {"action": "lock"|"suspend"|"logout"|"reboot"|"shutdown"}
 clipboard    {"mode": "read"|"write", "text": str}
 screenshot   {}                                grab the screen and show it in chat
+see          {"question": str}               LOOK at his screen and answer about it
 read_file    {"path": str}                     read a text file
 write_file   {"path": str, "text": str, "append": bool}   needs his OK
 find         {"pattern": str, "path": str}     search for files by name
@@ -473,6 +474,29 @@ def tool_power(args: Dict[str, Any], ag: "Agent") -> str:
     return power_action(action)
 
 
+def tool_see(args: Dict[str, Any], ag: "Agent") -> str:
+    """Grab the screen and hand it to a local vision model."""
+    from george_vision import DESCRIBE, Eyes
+    question = str(args.get("question", "") or args.get("prompt", "")).strip()
+    eyes = Eyes(ag.cfg)
+    if not eyes.available():
+        ag.tool_card("see", "", "no vision model")
+        return ("No vision model is pulled. Tell him to open Settings > Eyes "
+                "and pull one, or run: ollama pull moondream")
+    ag.step("taking a look at his screen")
+    ok, shot = take_screenshot()
+    if not ok:
+        ag.tool_card("see", "", "no screenshot")
+        return "could not grab the screen: %s" % shot
+    prompt = DESCRIBE if not question else (
+        "Answer this about the screen in one or two sentences: " + question)
+    answer = eyes.look(shot, prompt)
+    ag.show_image(shot)
+    ag.tool_card("see", question[:60] or "what is on screen",
+                 "ok" if not answer.startswith("cannot see") else "failed")
+    return answer
+
+
 def tool_open_path(args: Dict[str, Any], ag: "Agent") -> str:
     path = str(args.get("path", "") or args.get("file", "")).strip()
     ag.step("opening %s" % path)
@@ -511,6 +535,7 @@ TOOLS: Dict[str, Callable[[Dict[str, Any], "Agent"], str]] = {
     "volume": tool_volume,
     "power": tool_power,
     "open_path": tool_open_path,
+    "see": tool_see,
 }
 
 # names a 7B model reaches for by mistake -> what it actually meant
@@ -536,6 +561,8 @@ TOOL_ALIASES = {
     "shutdown": "power", "reboot": "power", "logout": "power",
     "open_file": "open_path", "open_folder": "open_path", "xdg_open":
         "open_path",
+    "look": "see", "look_at_screen": "see", "vision": "see",
+    "view_screen": "see", "watch": "see", "eyes": "see",
 }
 
 

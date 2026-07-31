@@ -11,6 +11,8 @@
 #
 #  Flags:   --uninstall  --yes  --no-model  --model <tag>  --deps-only
 #           --no-deps  --allow-remote-ollama
+#           --no-voice  --voice <piper-voice>   (default en_GB-alan-medium)
+#           --no-stt    --no-vision  --vision <ollama-model>
 #  Env:     GEORGE_REPO  GEORGE_BRANCH  GEORGE_MODEL  GEORGE_PREFIX
 # =====================================================================
 set -euo pipefail
@@ -28,8 +30,14 @@ ICON_DIR="${PREFIX}/share/icons/hicolor/scalable/apps"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/george"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/george"
 
-REQUIRED_FILES=(george.py george_core.py george_tools.py george_voice.py george_theme.py george_hud.py)
+REQUIRED_FILES=(george.py george_core.py george_tools.py george_voice.py george_theme.py george_hud.py george_vision.py george_sound.py)
 OPTIONAL_FILES=(README.md george.svg install.sh)
+
+VOICE="${GEORGE_VOICE:-en_GB-alan-medium}"
+VISION="${GEORGE_VISION:-moondream}"
+DO_VOICE=1
+DO_STT=1
+DO_VISION=1
 
 ASSUME_YES=0
 DO_MODEL=1
@@ -375,6 +383,122 @@ LAUNCH
   esac
 }
 
+# ---------------------------------------------------------- voice ----
+# espeak is the fallback and it sounds like 1998. Piper is a real neural
+# voice and it is one binary plus a 60 MB model, so it goes in by
+# default rather than being something he has to find out about.
+VOICE_DIR="${HOME}/.local/share/piper-voices"
+WHISPER_DIR="${HOME}/.local/share/whisper"
+HF="https://huggingface.co"
+
+install_piper_binary() {
+  have piper && { dim "piper already installed"; return 0; }
+
+  if have pipx; then
+    pipx install piper-tts >/dev/null 2>&1 && have piper && \
+      { ok "piper installed (pipx)"; return 0; }
+  fi
+  if have pip3 || have pip; then
+    local PIP; PIP="$(command -v pip3 || command -v pip)"
+    "${PIP}" install --user piper-tts >/dev/null 2>&1 || \
+      "${PIP}" install --user --break-system-packages piper-tts \
+        >/dev/null 2>&1 || true
+    have piper && { ok "piper installed (pip)"; return 0; }
+  fi
+
+  # last resort: the released binary. The asset name carries a version,
+  # so ask the API for it rather than hardcoding a URL that will rot.
+  local api url tmp
+  api="https://api.github.com/repos/rhasspy/piper/releases/latest"
+  url="$(curl -fsSL "${api}" 2>/dev/null \
+        | grep -o '"browser_download_url": *"[^"]*linux_x86_64[^"]*"' \
+        | head -n1 | cut -d'"' -f4 || true)"
+  if [ -n "${url}" ]; then
+    tmp="$(mktemp -d)"
+    if curl -fsSL "${url}" -o "${tmp}/piper.tgz" 2>/dev/null &&
+       tar -xzf "${tmp}/piper.tgz" -C "${tmp}" 2>/dev/null; then
+      mkdir -p "${HOME}/.local/share/piper" "${BIN_DIR}"
+      cp -r "${tmp}"/piper/* "${HOME}/.local/share/piper/" 2>/dev/null || true
+      if [ -x "${HOME}/.local/share/piper/piper" ]; then
+        ln -sf "${HOME}/.local/share/piper/piper" "${BIN_DIR}/piper"
+        rm -rf "${tmp}"
+        ok "piper installed (github release)"
+        return 0
+      fi
+    fi
+    rm -rf "${tmp}"
+  fi
+  warn "could not install piper - George falls back to espeak"
+  dim "that still talks, it just sounds robotic"
+  return 1
+}
+
+install_voice() {
+  say "installing a voice (${VOICE})"
+  install_piper_binary || true
+
+  # en_GB-alan-medium  ->  en/en_GB/alan/medium/en_GB-alan-medium.onnx
+  local region voice quality lang base
+  region="${VOICE%%-*}"
+  quality="${VOICE##*-}"
+  voice="${VOICE#*-}"; voice="${voice%-*}"
+  lang="${region%%_*}"
+  base="${HF}/rhasspy/piper-voices/resolve/v1.0.0/${lang}/${region}/${voice}/${quality}/${VOICE}"
+
+  mkdir -p "${VOICE_DIR}"
+  if [ -f "${VOICE_DIR}/${VOICE}.onnx" ]; then
+    ok "voice already there: ${VOICE}"
+    return 0
+  fi
+  if curl -fsSL "${base}.onnx" -o "${VOICE_DIR}/${VOICE}.onnx" 2>/dev/null &&
+     curl -fsSL "${base}.onnx.json" -o "${VOICE_DIR}/${VOICE}.onnx.json" \
+       2>/dev/null; then
+    ok "voice installed: ${VOICE}"
+  else
+    rm -f "${VOICE_DIR}/${VOICE}.onnx" "${VOICE_DIR}/${VOICE}.onnx.json"
+    warn "could not download the voice - espeak will be used instead"
+    dim "browse others at ${HF}/rhasspy/piper-voices"
+  fi
+}
+
+install_stt() {
+  say "installing speech recognition (for the mic button)"
+  if ! have whisper-cli && ! have whisper-cpp && ! have whisper; then
+    pkg_install_soft whisper.cpp whisper-cpp
+  fi
+  if ! have whisper-cli && ! have whisper-cpp && ! have whisper; then
+    warn "no whisper found - the mic button will say so"
+    dim "install whisper.cpp and re-run, or use the keyboard"
+    return 1
+  fi
+  mkdir -p "${WHISPER_DIR}"
+  if ls "${WHISPER_DIR}"/ggml-*.bin >/dev/null 2>&1; then
+    ok "whisper model already there"
+    return 0
+  fi
+  if curl -fsSL "${HF}/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
+       -o "${WHISPER_DIR}/ggml-base.en.bin" 2>/dev/null; then
+    ok "whisper model installed (base.en)"
+  else
+    rm -f "${WHISPER_DIR}/ggml-base.en.bin"
+    warn "could not fetch the whisper model - mic stays off"
+  fi
+}
+
+pull_vision() {
+  have ollama || return 0
+  say "pulling a vision model so George can see the screen (${VISION})"
+  if ollama list 2>/dev/null | grep -q "^${VISION}"; then
+    ok "vision model already pulled"
+    return 0
+  fi
+  if ollama pull "${VISION}" 2>&1 | tail -n1; then
+    ok "vision model installed: ${VISION}"
+  else
+    warn "could not pull ${VISION} - do it later from Settings > Eyes"
+  fi
+}
+
 make_desktop() {
   cat > "${DESKTOP_DIR}/com.thepriest.george.desktop" <<DESK
 [Desktop Entry]
@@ -448,6 +572,11 @@ while [ "$#" -gt 0 ]; do
     --yes|-y)    ASSUME_YES=1 ;;
     --no-model)  DO_MODEL=0 ;;
     --deps-only) DEPS_ONLY=1 ;;
+    --no-voice)  DO_VOICE=0 ;;
+    --no-stt)    DO_STT=0 ;;
+    --no-vision) DO_VISION=0 ;;
+    --voice)     shift; VOICE="${1:-${VOICE}}" ;;
+    --vision)    shift; VISION="${1:-${VISION}}" ;;
     --no-deps)   DO_DEPS=0 ;;
     --allow-remote-ollama) ALLOW_REMOTE_OLLAMA=1 ;;
     --model)     shift; MODEL="${1:-$MODEL}" ;;
@@ -499,6 +628,9 @@ verify_source
 install_files
 make_launcher
 make_desktop
+[ "${DO_VOICE}" = "1" ]  && install_voice || true
+[ "${DO_STT}" = "1" ]    && install_stt || true
+[ "${DO_VISION}" = "1" ] && pull_vision || true
 pull_model
 
 [ -n "${CLEANUP_SRC}" ] && rm -rf "${CLEANUP_SRC}"

@@ -200,6 +200,50 @@ X.TOOLS["_boom"] = _boom
 ok("crashing tool is caught", "kaboom" in agent.call_tool("_boom", {}))
 del X.TOOLS["_boom"]
 
+# ------------------------------------------------------- thinking switch
+# The think field goes at the TOP LEVEL of the request, not inside
+# options -- ollama ignores it silently if it is nested, which would
+# make the speed setting a lie.
+import json as _json                                          # noqa: E402
+from http.server import BaseHTTPRequestHandler, HTTPServer     # noqa: E402
+
+seen = {}
+
+
+class _Cap(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        seen.clear()
+        seen.update(_json.loads(body))
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'{"message":{"content":"hi"},"done":true}\n')
+
+    def do_GET(self):
+        b = b'{"models":[{"name":"m","size":1}]}'
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+
+_srv = HTTPServer(("127.0.0.1", 0), _Cap)
+threading.Thread(target=_srv.serve_forever, daemon=True).start()
+_url = "http://127.0.0.1:%d" % _srv.server_address[1]
+
+for mode, want in (("off", False), ("on", True), ("auto", None)):
+    cl = C.Ollama(C.coerce_config({"ollama_url": _url, "thinking": mode}))
+    cl.chat_stream([{"role": "user", "content": "x"}], lambda t: None,
+                   threading.Event())
+    if want is None:
+        ok("thinking auto sends nothing", "think" not in seen, str(seen)[:80])
+    else:
+        eq("thinking %s" % mode, seen.get("think"), want)
+    ok("think is top level (%s)" % mode, "think" not in seen.get("options", {}))
+
 # -------------------------------------------------------------- personas
 for persona in ("jarvis", "plain", "blunt"):
     agent.cfg["persona"] = persona

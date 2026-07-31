@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = os.path.join(
@@ -70,6 +70,7 @@ DEFAULTS: Dict[str, Any] = {
     "stall_seconds": 90,             # no token for this long = say so
     "tool_timeout": 150,             # a wedged tool cannot wedge the turn
     "auto_model_fallback": True,     # configured model gone -> use one here
+    "thinking": "off",               # auto | off | on  (see chat_stream)
 
     "voice_enabled": True,
     "voice_engine": "auto",          # auto | piper | espeak | none
@@ -121,6 +122,7 @@ LIMITS: Dict[str, Tuple[float, float]] = {
 }
 
 CHOICES: Dict[str, Tuple[str, ...]] = {
+    "thinking": ("auto", "off", "on"),
     "voice_engine": ("auto", "piper", "espeak", "none"),
     "persona": ("jarvis", "plain", "blunt"),
     "accent": ("cyan", "amber", "violet", "green", "red", "white"),
@@ -809,12 +811,29 @@ class Ollama:
                 "num_ctx": int(self.cfg.get("num_ctx", 8192)),
             },
         }
+        # Reasoning models auto-think on every request, and George's loop
+        # can take fourteen turns -- so the thinking happens fourteen
+        # times before he says a word. Switching it off is the single
+        # biggest speed win available without changing model.
+        think = str(self.cfg.get("thinking", "off")).lower()
+        if think == "off":
+            payload["think"] = False
+        elif think == "on":
+            payload["think"] = True
         timeout = int(self.cfg.get("request_timeout", 300))
         stall_after = float(self.cfg.get("stall_seconds", 90))
         chunks: List[str] = []
         try:
             resp = self._post("/api/chat", payload, timeout)
         except urllib.error.HTTPError as exc:
+            if exc.code == 400 and "think" in payload:
+                # an ollama too old to know the field: retry without it
+                log("this ollama rejects `think`; retrying without it")
+                payload.pop("think", None)
+                try:
+                    resp = self._post("/api/chat", payload, timeout)
+                except Exception as exc2:
+                    raise OllamaError("ollama request failed: %s" % exc2) from exc2
             body = ""
             try:
                 body = exc.read().decode("utf-8", "replace")[:400]
@@ -1865,19 +1884,22 @@ class OllamaSupervisor:
 # MODEL MANAGEMENT  --  pull, delete, browse, all from inside the app
 # =====================================================================
 
+# Ordered for THIS app: George drives a tool loop, so what matters is
+# emitting clean JSON on the first try, not prose quality. Anything on
+# ollama.com works via the free-text box; these are the ones worth
+# starting from.
 CURATED_MODELS = [
-    ("deepseek-r1:7b", "4.7 GB", "reasoner, George's default"),
-    ("deepseek-r1:8b", "5.2 GB", "same family, a bit sharper"),
-    ("deepseek-r1:14b", "9.0 GB", "much better, needs ~12 GB VRAM"),
-    ("qwen2.5:7b", "4.7 GB", "fast all-rounder, follows JSON well"),
-    ("qwen2.5:14b", "9.0 GB", "stronger tool use"),
-    ("llama3.1:8b", "4.9 GB", "solid general chat"),
+    ("qwen3:4b", "2.6 GB", "fast agent pick - trained for tool calls"),
+    ("qwen3:8b", "5.2 GB", "same family, sharper, still quick"),
+    ("granite4:3b", "2.1 GB", "tiny and tidy, built for tool calling"),
+    ("llama3.2:3b", "2.0 GB", "smallest usable, good on a laptop"),
+    ("gemma3:4b", "3.3 GB", "small, tool calls, vision too"),
+    ("qwen2.5:7b", "4.7 GB", "proven all-rounder, follows JSON well"),
     ("mistral:7b", "4.1 GB", "light and quick"),
-    ("gemma2:9b", "5.4 GB", "good writing"),
-    ("phi4:14b", "9.1 GB", "strong reasoning for the size"),
+    ("deepseek-r1:7b", "4.7 GB", "reasoner - smart but slow in a loop"),
+    ("qwen3:14b", "9.0 GB", "best quality here, wants ~12 GB VRAM"),
     ("qwen2.5-coder:7b", "4.7 GB", "code"),
     ("llava:7b", "4.7 GB", "vision"),
-    ("nomic-embed-text", "274 MB", "embeddings"),
 ]
 
 

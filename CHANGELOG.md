@@ -1,5 +1,23 @@
 # George changelog
 
+## 2.1.0
+
+- **Fixed the icon.** The app registers as `com.thepriest.george` but the
+  installer wrote `org.thepriest.george.desktop`, so nothing matched and
+  the window fell back to the generic python icon. The desktop file,
+  icon file, `Icon=`, `StartupWMClass`, `g_set_prgname()` and the window
+  icon name are now all the same string. A stale `org.*` pair from an
+  earlier install is removed on upgrade.
+- The icon also resolves when running from a checkout that was never
+  installed - the app registers its own icon search path.
+- **Reasoning trace is now a setting, defaulting to off.** A reasoning
+  model thinks before every step and a turn can take fourteen of them,
+  so the thinking cost was being paid fourteen times per answer. Sent as
+  ollama's top-level `think` field, with a retry that drops the field if
+  the server is too old to know it.
+- Refreshed the suggested models around what this app actually needs:
+  clean JSON on the first try, not prose quality.
+
 ## 2.0.0
 
 Rebuilt the interface, gave him a voice worth listening to, and made the

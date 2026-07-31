@@ -351,7 +351,11 @@ install_files() {
   [ -f "${SRC_DIR}/install.sh" ] && \
     install -m 0755 "${SRC_DIR}/install.sh" "${APP_DIR}/install.sh"
   [ -f "${SRC_DIR}/george.svg" ] && \
-    install -m 0644 "${SRC_DIR}/george.svg" "${ICON_DIR}/org.thepriest.george.svg"
+    install -m 0644 "${SRC_DIR}/george.svg" "${ICON_DIR}/com.thepriest.george.svg"
+  # a v1/v2 install wrote org.* -- the ID never matched the app, so the
+  # window fell back to the generic python icon. Clear the stale pair.
+  rm -f "${DESKTOP_DIR}/org.thepriest.george.desktop" \
+        "${ICON_DIR}/org.thepriest.george.svg" 2>/dev/null || true
   ok "installed to ${APP_DIR}"
 }
 
@@ -372,18 +376,19 @@ LAUNCH
 }
 
 make_desktop() {
-  cat > "${DESKTOP_DIR}/org.thepriest.george.desktop" <<DESK
+  cat > "${DESKTOP_DIR}/com.thepriest.george.desktop" <<DESK
 [Desktop Entry]
 Type=Application
 Name=George
 GenericName=Local AI Assistant
 Comment=Fully local desktop AI - Ollama, no API keys, no cloud
 Exec=${BIN_DIR}/george
-Icon=org.thepriest.george
+Icon=com.thepriest.george
 Terminal=false
 Categories=Utility;Development;
 Keywords=ai;assistant;ollama;local;jarvis;
 StartupNotify=true
+StartupWMClass=com.thepriest.george
 DESK
   have update-desktop-database && \
     update-desktop-database "${DESKTOP_DIR}" >/dev/null 2>&1 || true
@@ -421,6 +426,8 @@ uninstall() {
   say "removing George"
   rm -rf "${APP_DIR}"
   rm -f "${BIN_DIR}/george"
+  rm -f "${DESKTOP_DIR}/com.thepriest.george.desktop"
+  rm -f "${ICON_DIR}/com.thepriest.george.svg"
   rm -f "${DESKTOP_DIR}/org.thepriest.george.desktop"
   rm -f "${ICON_DIR}/org.thepriest.george.svg"
   ok "app removed"

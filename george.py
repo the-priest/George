@@ -311,6 +311,7 @@ class GeorgeWindow(Adw.ApplicationWindow):
         self.supervisor = supervisor
         self.models = ModelManager(cfg)
         self.set_default_size(1320, 880)
+        self.set_icon_name(APP_ID)
 
         self.memory = MemoryStore()
         self.chats = ChatStore(cfg)
@@ -1550,6 +1551,13 @@ class GeorgeWindow(Adw.ApplicationWindow):
         row(grp, "Fall back to an installed model",
             "if the chosen tag is not pulled",
             switch_for("auto_model_fallback"))
+        grp.add(combo_for("thinking", ["off", "auto", "on"],
+                          "Reasoning trace"))
+        r = Adw.ActionRow(title="Why off is the default")
+        r.set_subtitle("A reasoner thinks before every step, and a turn can "
+                       "take fourteen. Off is much faster; on is better at "
+                       "hard questions.")
+        grp.add(r)
         page.add(grp)
         win.add(page)
 
@@ -1690,6 +1698,59 @@ class GeorgeWindow(Adw.ApplicationWindow):
 # APPLICATION
 # =====================================================================
 
+def claim_identity() -> None:
+    """Make the desktop see George instead of "python3".
+
+    Three separate mechanisms have to agree or the window falls back to
+    a generic icon:
+
+      * Wayland matches the window's app_id -- which GTK takes from the
+        Gio.Application id -- against a .desktop file of the same name.
+      * X11 builds WM_CLASS from g_get_prgname(), which Python sets to
+        the script name, so it has to be overridden before the display
+        is opened.
+      * The icon itself has to be findable by name in an icon theme.
+
+    All three now use APP_ID, and the app directory is added to the icon
+    search path so the icon also works when running from a checkout that
+    was never installed.
+    """
+    try:
+        GLib.set_prgname(APP_ID)
+        GLib.set_application_name(APP_NAME)
+    except Exception as exc:
+        log("could not set prgname: %s" % exc)
+
+
+def register_icon() -> None:
+    """Called once a display exists."""
+    try:
+        display = Gdk.Display.get_default()
+        if display is None:
+            return
+        theme = Gtk.IconTheme.get_for_display(display)
+        here = os.path.dirname(os.path.abspath(__file__))
+        for path in (here, os.path.join(here, "icons")):
+            if os.path.isdir(path):
+                theme.add_search_path(path)
+        # running from a checkout: the file is george.svg, but the theme
+        # looks it up by APP_ID, so give it that name in a cache dir
+        src = os.path.join(here, "george.svg")
+        if os.path.exists(src) and not theme.has_icon(APP_ID):
+            cache = os.path.join(GLib.get_user_cache_dir(), "george",
+                                 "icons", "hicolor", "scalable", "apps")
+            os.makedirs(cache, exist_ok=True)
+            dest = os.path.join(cache, APP_ID + ".svg")
+            if not os.path.exists(dest):
+                import shutil
+                shutil.copyfile(src, dest)
+            theme.add_search_path(os.path.join(
+                GLib.get_user_cache_dir(), "george", "icons"))
+        Gtk.Window.set_default_icon_name(APP_ID)
+    except Exception as exc:
+        log("icon registration failed: %s" % exc)
+
+
 class GeorgeApp(Adw.Application):
     """Owns the ollama daemon's lifetime.  It comes up with the app and
     goes down with it -- but only if we were the ones who started it."""
@@ -1712,6 +1773,7 @@ class GeorgeApp(Adw.Application):
     def do_activate(self) -> None:
         Adw.StyleManager.get_default().set_color_scheme(
             Adw.ColorScheme.FORCE_DARK)
+        register_icon()
         if self.win is None:
             self.win = GeorgeWindow(self, self.cfg, self.supervisor)
             self.win.connect("close-request", self._on_close)
@@ -1769,6 +1831,7 @@ def main() -> int:
             "  Data:   %s\n" % (CONFIG_PATH, os.path.dirname(NOTES_PATH)))
         return 0
     install_crash_handlers()
+    claim_identity()
     log("starting %s %s" % (APP_NAME, VERSION))
     return GeorgeApp().run(sys.argv)
 

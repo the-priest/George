@@ -233,6 +233,7 @@ class AiBubble:
         self.text = text
         self.box = _box(spacing=8)
         self.box.add_css_class("bubble-ai")
+        log("ui: AiBubble.__init__ css=%s text=%s" % (self.box.get_css_classes(), text[:40]))
 
         head = _box(horizontal=True, spacing=8)
         av = _label("G", "avatar", wrap=False, xalign=0.5)
@@ -270,6 +271,7 @@ class AiBubble:
     def finalise(self, text: str) -> None:
         """Swap the plain streaming label for rendered blocks."""
         self.text = text
+        log("ui: AiBubble.finalise text=%s" % (text[:80]))
         try:
             _clear(self.content)
             self.stream_label = None
@@ -756,6 +758,7 @@ class GeorgeWindow(Adw.ApplicationWindow):
         row = _box(horizontal=True)
         widget.set_halign(align)
         row.append(widget)
+        log("ui: _row appended widget css=%s" % (widget.get_css_classes()))
         self.transcript.append(row)
         self._trim_transcript()
         return row
@@ -763,6 +766,7 @@ class GeorgeWindow(Adw.ApplicationWindow):
     def add_user_bubble(self, text: str) -> None:
         box = _box(spacing=4)
         box.add_css_class("bubble-user")
+        log("ui: add_user_bubble css=%s text=%s" % (box.get_css_classes(), text[:40]))
         box.set_size_request(120, -1)
         lbl = _label(text, "bubble-text", selectable=True)
         lbl.set_max_width_chars(66)

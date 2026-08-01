@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -283,6 +284,17 @@ def log(msg: str) -> None:
             sys.stderr.write(line + "\n")
         except Exception:
             pass
+
+
+def log_exc(msg: str) -> None:
+    """Log a message and the current exception traceback (if any)."""
+    try:
+        log(msg)
+        # traceback.format_exc() is safe even if there's no current exception
+        log(traceback.format_exc())
+    except Exception:
+        # Never let logging cause a crash
+        pass
 
 
 def install_crash_handlers() -> None:
@@ -1041,7 +1053,8 @@ class Ollama:
         try:
             with urllib.request.urlopen(self.base + "/api/tags", timeout=4):
                 return True
-        except Exception:
+        except Exception as exc:
+            log_exc("ollama alive check failed: %s" % exc)
             return False
 
     def models(self) -> List[str]:
@@ -1059,7 +1072,8 @@ class Ollama:
                                         timeout=5) as r:
                 return str(json.loads(r.read().decode("utf-8", "replace")
                                       ).get("version", "?"))
-        except Exception:
+        except Exception as exc:
+            log_exc("ollama version failed: %s" % exc)
             return "?"
 
     def resolve_model(self) -> Tuple[str, str]:
@@ -1126,7 +1140,7 @@ class Ollama:
                 body = exc.read().decode("utf-8", "replace")[:400]
                 body = str(json.loads(body).get("error", body))
             except Exception:
-                pass
+                log_exc("failed to parse ollama error body")
             if exc.code == 404:
                 raise OllamaError(
                     "ollama does not have %s. pull it from the Models "
@@ -1139,6 +1153,7 @@ class Ollama:
                 "cannot reach ollama at %s (%s). is `ollama serve` running?"
                 % (self.base, exc.reason)) from exc
         except Exception as exc:
+            log_exc("ollama request failed: %s" % exc)
             raise OllamaError("ollama request failed: %s" % exc) from exc
 
         last_token = time.time()
@@ -1383,15 +1398,32 @@ def fetch_news(feeds: List[List[str]], per_feed: int = 5,
 
 def run_shell(command: str, timeout: int = 60,
               cwd: Optional[str] = None) -> Tuple[int, str]:
+    """Run a shell command safely.
+
+    If the command string contains no obvious shell metacharacters, run
+    it without invoking the shell (safer).  Otherwise fall back to
+    shell=True to preserve behaviour for complex one-liners.
+    """
     try:
-        # Bytes, not text=True. cmd.exe writes the OEM code page and
-        # Python would decode it as ANSI, turning every box-drawing
-        # character and accented filename into noise.
-        proc = subprocess.run(command, shell=True, capture_output=True,
-                              timeout=timeout, cwd=cwd, **osx.run_kwargs())
+        if isinstance(command, str):
+            # Characters that usually require a shell to interpret.
+            shell_meta = set('|&;<>$`*?(){}[]')
+            if not any(ch in command for ch in shell_meta):
+                args = shlex.split(command)
+                proc = subprocess.run(args, shell=False, capture_output=True,
+                                      timeout=timeout, cwd=cwd,
+                                      **osx.run_kwargs())
+            else:
+                proc = subprocess.run(command, shell=True, capture_output=True,
+                                      timeout=timeout, cwd=cwd,
+                                      **osx.run_kwargs())
+        else:
+            proc = subprocess.run(command, shell=False, capture_output=True,
+                                  timeout=timeout, cwd=cwd, **osx.run_kwargs())
     except subprocess.TimeoutExpired:
         return 124, "[timed out after %ds]" % timeout
     except Exception as exc:                       # pragma: no cover
+        log_exc("run_shell failed to launch: %s" % exc)
         return 1, "[failed to launch: %s]" % exc
     out = osx.decode_output(proc.stdout or b"") + \
         osx.decode_output(proc.stderr or b"")

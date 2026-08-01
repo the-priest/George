@@ -367,13 +367,17 @@ class GeorgeWindow(Adw.ApplicationWindow):
                 return
         # If a bundled george.png exists next to the script, add a background
         # CSS rule that uses it as a large centered background for the chat.
+        # Do not set `opacity` on the container (it affects children). Instead
+        # overlay a dark translucent gradient above the image so text stays
+        # readable while the art shows through.
         try:
             bg = os.path.join(os.path.dirname(__file__), "george.png")
             if os.path.isfile(bg):
                 bg_url = "file://" + os.path.abspath(bg)
-                extra = ('\n.background { background-image: url("%s"); '
+                extra = ('\n.chat-bg { background-image: linear-gradient(rgba(5,7,10,0.86), '
+                         'rgba(5,7,10,0.86)), url("%s"); '
                          'background-size: cover; background-position: center; '
-                         'background-repeat: no-repeat; opacity: 0.06; }\n' % bg_url)
+                         'background-repeat: no-repeat; }\n' % bg_url)
                 try:
                     provider.load_from_data(extra.encode("utf-8"))
                 except Exception as _:
@@ -629,6 +633,9 @@ class GeorgeWindow(Adw.ApplicationWindow):
         self.scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.scroll.set_vexpand(True)
         self.transcript = _margins(_box(spacing=12), 18, 10, 22, 22)
+        # allow a large background image to be applied only to the transcript
+        # area so the rest of the UI keeps full opacity and contrast.
+        self.transcript.add_css_class("chat-bg")
         self.scroll.set_child(self.transcript)
         adj = self.scroll.get_vadjustment()
         adj.connect("changed", self._on_adj_changed)

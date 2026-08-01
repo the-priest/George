@@ -89,8 +89,10 @@ def palette(cfg: Dict[str, Any]) -> Dict[str, str]:
 # STYLESHEET
 # =====================================================================
 
-_FONT_STACK = "'Inter', 'Cantarell', 'Noto Sans', sans-serif"
-_MONO_STACK = "'JetBrains Mono', 'Fira Mono', 'DejaVu Sans Mono', monospace"
+_FONT_STACK = ("'Inter', 'Cantarell', 'Segoe UI Variable Text', "
+               "'Segoe UI', 'Noto Sans', sans-serif")
+_MONO_STACK = ("'JetBrains Mono', 'Fira Mono', 'Cascadia Mono', "
+               "'Consolas', 'DejaVu Sans Mono', monospace")
 
 
 def _px(value: float, scale: float, floor: int = 9) -> int:

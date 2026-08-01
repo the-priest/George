@@ -10,6 +10,8 @@ to put in it.
 
 ## Install
 
+### Linux
+
 ```
 curl -fsSL https://raw.githubusercontent.com/the-priest/George/main/install.sh | bash
 ```
@@ -37,6 +39,51 @@ Then:
 ```
 george
 ```
+
+### Windows
+
+Download **George-Setup-x.y.z-x64.exe** from
+[Releases](https://github.com/the-priest/George/releases) and run it, or do
+it in one line:
+
+```
+irm https://raw.githubusercontent.com/the-priest/George/main/install.ps1 | iex
+```
+
+That fetches the latest build, installs Ollama with winget if it is
+missing, pulls a model and leaves Start Menu and desktop shortcuts. It
+installs per-user, so Windows never asks for an administrator.
+
+There is nothing to install alongside it — GTK4, libadwaita and Python are
+inside the `.exe`. You still need [Ollama](https://ollama.com/download/windows),
+and George starts it on launch and stops it on exit, exactly as he does on
+Linux.
+
+| environment variable | does |
+|---|---|
+| `$env:GEORGE_MODEL` | pull something other than `qwen3:4b`; `""` skips it |
+| `$env:GEORGE_PREFIX` | install somewhere other than `%LOCALAPPDATA%\Programs\George` |
+| `$env:GEORGE_YES` | no prompts (never auto-approves deleting your data) |
+| `$env:GEORGE_UNINSTALL` | remove it again |
+
+Windows SmartScreen warns about an unsigned program the first time:
+**More info → Run anyway.** Signing needs a certificate I do not have.
+
+If the window comes up black, your graphics driver cannot give GTK4 the
+OpenGL context its default renderer wants. Use the **George (safe
+graphics)** shortcut, or set `safe_graphics` to `true` in
+`%APPDATA%\George\config.json`.
+
+#### What differs from Linux
+
+Everything works except three things Windows genuinely does not offer:
+
+- **Reading** the master volume level. Setting it, muting and the media
+  keys all work; reading it back needs the COM audio endpoint API, and
+  George says so rather than inventing a number.
+- **Push-to-talk** needs `ffmpeg` on your PATH (`winget install Gyan.FFmpeg`)
+  plus whisper.cpp — there is no `arecord` to fall back on.
+- **Load average**, which does not exist on Windows. The CPU percentage does.
 
 or launch it from your application menu. Trailing words are sent as your
 first message: `george what's on the news`.

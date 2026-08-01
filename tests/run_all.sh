@@ -20,6 +20,9 @@ python3 tests/test_v2.py || fail=1
 step "auto-run gate (what may run without asking)"
 python3 tests/test_autorun.py || fail=1
 
+step "windows behaviour (runs on linux)"
+python3 tests/test_windows.py || fail=1
+
 step "gate fuzz"
 python3 tests/test_gate_fuzz.py || fail=1
 

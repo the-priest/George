@@ -23,6 +23,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import george_platform as osx
 from george_core import log, run_shell, strip_reasoning, _read_first
 
 
@@ -33,6 +34,27 @@ from george_core import log, run_shell, strip_reasoning, _read_first
 _PIPER_DIRS = ["~/.local/share/piper-voices", "~/.local/share/piper",
                "~/.cache/piper", "/usr/share/piper-voices",
                "/usr/local/share/piper-voices"]
+if osx.IS_WINDOWS:
+    _PIPER_DIRS = [os.path.join(osx.data_dir(), "piper-voices"),
+                   os.path.join(osx.data_dir(), "piper"),
+                   os.path.join(os.environ.get("LOCALAPPDATA", ""), "Piper"),
+                   os.path.join(os.environ.get("ProgramFiles", ""), "Piper"),
+                   "~/piper"] + _PIPER_DIRS
+
+
+# SAPI is the reason voice works on a fresh Windows box with nothing
+# installed: every Windows since XP ships it, and .NET's wrapper around
+# it is one Add-Type away. Text arrives on stdin so no sentence can ever
+# break the quoting.
+_SAPI_SCRIPT = ("Add-Type -AssemblyName System.Speech; "
+                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                "$s.Rate = %d; $s.Volume = 100; %s "
+                "$s.Speak([Console]::In.ReadToEnd())")
+
+
+def _sapi_rate(speed: float) -> int:
+    """SAPI rate is -10..10 where 0 is normal, not a multiplier."""
+    return max(-10, min(10, int(round((speed - 1.0) * 10))))
 
 _CODE_FENCE = re.compile(r"```.*?```", re.S)
 _INLINE_CODE = re.compile(r"`[^`]*`")
@@ -152,18 +174,26 @@ class TextToSpeech:
     # ---- engine selection -------------------------------------------
     def reconfigure(self) -> None:
         pref = str(self.cfg.get("voice_engine", "auto")).lower()
-        self._espeak = shutil.which("espeak-ng") or shutil.which("espeak")
-        piper_exe = shutil.which("piper")
+        self._espeak = (osx.find_binary("espeak-ng") or
+                        osx.find_binary("espeak"))
+        piper_exe = osx.find_binary("piper")
+        self._sapi = bool(osx.IS_WINDOWS and
+                          (osx.find_binary("powershell") or
+                           osx.find_binary("pwsh")))
         model = _find_piper_model(self.cfg)
         piper_ok = bool(piper_exe and model)
         if piper_ok:
             self._piper_cmd = [piper_exe]
             self._piper_model = model
-        for p in (["paplay"], ["aplay", "-q"], ["pw-play"], ["ffplay", "-nodisp",
-                                                             "-autoexit", "-loglevel", "quiet"]):
-            if shutil.which(p[0]):
-                self._player = p
-                break
+        if osx.IS_WINDOWS:
+            self._player = ["winsound"]
+        else:
+            for p in (["paplay"], ["aplay", "-q"], ["pw-play"],
+                      ["ffplay", "-nodisp", "-autoexit", "-loglevel",
+                       "quiet"]):
+                if shutil.which(p[0]):
+                    self._player = p
+                    break
 
         if pref == "none":
             self._engine = None
@@ -171,16 +201,22 @@ class TextToSpeech:
             self._engine = "piper"
         elif pref == "espeak" and self._espeak:
             self._engine = "espeak"
+        elif pref == "sapi" and self._sapi:
+            self._engine = "sapi"
         elif piper_ok and self._player:
             self._engine = "piper"
+        elif self._sapi:
+            # Before espeak on Windows on purpose: SAPI is already
+            # installed and sounds like a person, espeak sounds like 1998.
+            self._engine = "sapi"
         elif self._espeak:
             self._engine = "espeak"
         elif shutil.which("spd-say"):
             self._engine = "spd"
         else:
             self._engine = None
-        log("tts engine=%s piper=%s espeak=%s" %
-            (self._engine, bool(piper_ok), bool(self._espeak)))
+        log("tts engine=%s piper=%s espeak=%s sapi=%s" %
+            (self._engine, bool(piper_ok), bool(self._espeak), self._sapi))
 
     @property
     def engine_name(self) -> str:
@@ -213,14 +249,14 @@ class TextToSpeech:
                 self._q.get_nowait()
             except queue.Empty:
                 break
-        if proc and proc.poll() is None:
+        if osx.IS_WINDOWS:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                import winsound
+                winsound.PlaySound(None, winsound.SND_PURGE)
             except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+                pass
+        if proc and proc.poll() is None:
+            osx.kill_tree(proc, force=True)
         self._emit("idle")
 
     def _emit(self, state: str) -> None:
@@ -248,25 +284,45 @@ class TextToSpeech:
             if self._q.empty():
                 self._emit("idle")
 
-    def _spawn(self, argv: List[str], gen: int) -> None:
-        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                start_new_session=True)
+    def _play_wav(self, path: str, gen: int) -> None:
+        """Blocking WAV playback with no external player.
+
+        This runs on the TTS worker thread, so blocking is fine and it
+        is what keeps the sentence queue in order. stop() interrupts it
+        with SND_PURGE from the UI thread.
+        """
+        try:
+            import winsound
+            with self._lock:
+                if gen != self._gen:
+                    return
+            winsound.PlaySound(path, winsound.SND_FILENAME |
+                               winsound.SND_NODEFAULT)
+        except Exception as exc:
+            log("wav playback failed: %s" % exc)
+
+    def _spawn(self, argv: List[str], gen: int,
+               stdin_text: Optional[str] = None) -> None:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE if stdin_text is not None
+            else subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            **osx.spawn_kwargs())
         with self._lock:
             if gen != self._gen:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except Exception:
-                    pass
+                osx.kill_tree(proc, force=True)
                 return
             self._cur = proc
         try:
-            proc.wait(timeout=120)
+            if stdin_text is not None:
+                proc.communicate(stdin_text.encode("utf-8"), timeout=120)
+            else:
+                proc.wait(timeout=120)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except Exception:
-                pass
+            osx.kill_tree(proc, force=True)
+        except Exception as exc:
+            log("tts spawn failed: %s" % exc)
         with self._lock:
             if self._cur is proc:
                 self._cur = None
@@ -289,11 +345,32 @@ class TextToSpeech:
                 self._engine = "espeak" if self._espeak else None
                 return
             if os.path.exists(wav):
-                self._spawn(self._player + [wav], gen)
+                if self._player == ["winsound"]:
+                    self._play_wav(wav, gen)
+                else:
+                    self._spawn(self._player + [wav], gen)
                 try:
                     os.unlink(wav)
                 except OSError:
                     pass
+            return
+        if self._engine == "sapi":
+            exe = osx.find_binary("powershell") or osx.find_binary("pwsh")
+            if not exe:
+                self._engine = None
+                return
+            voice = ""
+            pref = str(self.cfg.get("piper_voice_pref", "en_GB") or "").lower()
+            if pref.startswith("en_gb") or pref.startswith("en-gb"):
+                # Hazel is the British voice; if it is not installed the
+                # try/catch leaves the default in place rather than
+                # failing the whole utterance.
+                voice = ("try { $s.SelectVoice('Microsoft Hazel Desktop') } "
+                         "catch { }")
+            script = _SAPI_SCRIPT % (_sapi_rate(speed), voice)
+            self._spawn([exe, "-NoProfile", "-NonInteractive",
+                         "-ExecutionPolicy", "Bypass", "-Command", script],
+                        gen, stdin_text=sentence)
             return
         if self._engine == "espeak" and self._espeak:
             rate = str(int(165 * speed))
@@ -322,6 +399,17 @@ class SpeechToText:
 
     @staticmethod
     def _find_recorder() -> Optional[List[str]]:
+        if osx.IS_WINDOWS:
+            # No arecord on Windows. ffmpeg's dshow input is the only
+            # thing that records to a WAV without a pip install, and
+            # "audio=default" lets it pick the default capture device
+            # rather than making the user name their microphone.
+            exe = osx.find_binary("ffmpeg")
+            if exe:
+                return [exe, "-loglevel", "quiet", "-f", "dshow",
+                        "-i", "audio=default", "-ar", "16000", "-ac", "1",
+                        "-y"]
+            return None
         if shutil.which("parecord"):
             return ["parecord", "--channels=1", "--rate=16000",
                     "--file-format=wav"]
@@ -334,9 +422,10 @@ class SpeechToText:
 
     @staticmethod
     def _find_engine() -> Optional[str]:
-        for exe in ("whisper-cli", "whisper-cpp", "whisper", "faster-whisper"):
-            if shutil.which(exe):
-                return exe
+        for exe in ("whisper-cli", "whisper-cpp", "whisper", "faster-whisper",
+                    "main"):
+            if osx.find_binary(exe):
+                return "whisper-cli" if exe == "main" else exe
         return None
 
     @property
@@ -345,6 +434,9 @@ class SpeechToText:
 
     def why_unavailable(self) -> str:
         if not self.recorder:
+            if osx.IS_WINDOWS:
+                return ("no recorder found - install ffmpeg "
+                        "(winget install Gyan.FFmpeg) so the mic can record")
             return "no recorder found - install pipewire-pulse (parecord) or alsa-utils"
         if not self.engine:
             return "no local transcriber - install whisper.cpp (whisper-cli) or faster-whisper"
@@ -357,9 +449,10 @@ class SpeechToText:
                                  "george-in-%d.wav" % int(time.time()))
         argv = list(self.recorder) + [self._wav]
         try:
-            self._rec = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+            self._rec = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                                         stdout=subprocess.DEVNULL,
                                          stderr=subprocess.DEVNULL,
-                                         start_new_session=True)
+                                         **osx.spawn_kwargs())
             return True
         except Exception as exc:
             log("record failed: %s" % exc)
@@ -371,13 +464,20 @@ class SpeechToText:
         if not proc:
             return ""
         try:
-            proc.send_signal(signal.SIGINT)
+            if osx.IS_WINDOWS and proc.stdin is not None:
+                # ffmpeg stops cleanly and finalises the WAV header on
+                # "q" from stdin. A hard kill leaves a truncated file
+                # whisper then refuses to read.
+                try:
+                    proc.stdin.write(b"q")
+                    proc.stdin.flush()
+                except Exception:
+                    osx.interrupt(proc)
+            else:
+                proc.send_signal(signal.SIGINT)
             proc.wait(timeout=5)
         except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            osx.kill_tree(proc, force=True)
         if not os.path.exists(self._wav) or os.path.getsize(self._wav) < 2000:
             return ""
         wav = shlex.quote(self._wav)
@@ -414,8 +514,13 @@ class SpeechToText:
 
     @staticmethod
     def _whisper_cpp_model() -> str:
-        for d in ("~/.local/share/whisper", "~/.cache/whisper",
-                  "/usr/share/whisper.cpp/models", "~/whisper.cpp/models"):
+        dirs = ["~/.local/share/whisper", "~/.cache/whisper",
+                "/usr/share/whisper.cpp/models", "~/whisper.cpp/models"]
+        if osx.IS_WINDOWS:
+            dirs = [os.path.join(osx.data_dir(), "whisper"),
+                    os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                                 "whisper")] + dirs
+        for d in dirs:
             d = os.path.expanduser(d)
             if os.path.isdir(d):
                 for f in sorted(os.listdir(d)):

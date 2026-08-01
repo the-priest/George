@@ -23,6 +23,7 @@ import threading
 import wave
 from typing import Any, Dict, List, Optional, Tuple
 
+import george_platform as osx
 from george_core import log
 
 RATE = 44100
@@ -68,15 +69,18 @@ class Sounds:
 
     def __init__(self, cfg: Dict[str, Any]) -> None:
         self.cfg = cfg
-        self.dir = os.path.join(
-            os.environ.get("XDG_CACHE_HOME",
-                           os.path.expanduser("~/.cache")), "george", "sfx")
+        self.dir = os.path.join(osx.cache_dir(), "sfx")
         self.player = self._find_player()
         self._built: Dict[str, str] = {}
         self._lock = threading.Lock()
 
     @staticmethod
     def _find_player() -> Optional[List[str]]:
+        if osx.IS_WINDOWS:
+            # winsound is in the stdlib and plays a WAV without spawning
+            # anything, which matters here: these are 60ms blips and
+            # launching a process per blip would cost more than the blip.
+            return ["winsound"]
         for exe, argv in (("pw-play", ["pw-play"]),
                           ("paplay", ["paplay"]),
                           ("aplay", ["aplay", "-q"]),
@@ -120,10 +124,16 @@ class Sounds:
         if not path:
             return
         try:
+            if self.player == ["winsound"]:
+                import winsound
+                winsound.PlaySound(
+                    path, winsound.SND_FILENAME | winsound.SND_ASYNC |
+                    winsound.SND_NODEFAULT)
+                return
             subprocess.Popen(self.player + [path],
                              stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL,
-                             start_new_session=True)
+                             **osx.spawn_kwargs(detach=True))
         except Exception as exc:
             log("sound playback failed: %s" % exc)
 

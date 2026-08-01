@@ -40,6 +40,7 @@ from george_core import (
     install_crash_handlers, load_config, log, open_in_browser, reasoning_of,
     save_config, system_status, take_screenshot, weather,
 )
+import george_platform as osx
 from george_theme import FALLBACK_CSS, build_css, palette, rgb
 from george_tools import Agent, strip_action_json
 from george_voice import SpeechToText, TextToSpeech
@@ -1904,6 +1905,11 @@ def claim_identity() -> None:
         GLib.set_application_name(APP_NAME)
     except Exception as exc:
         log("could not set prgname: %s" % exc)
+    if osx.IS_WINDOWS:
+        # Without an explicit AppUserModelID the taskbar groups George
+        # under whatever launched it and shows that program's icon --
+        # the Windows version of exactly the bug 2.1.0 fixed on Wayland.
+        osx.win_set_app_id(APP_ID)
 
 
 def register_icon() -> None:
@@ -1961,12 +1967,23 @@ class GeorgeApp(Adw.Application):
         if self.win is None:
             self.win = GeorgeWindow(self, self.cfg, self.supervisor)
             self.win.connect("close-request", self._on_close)
-            for sig in (signal.SIGINT, signal.SIGTERM):
+            # GLib.unix_signal_add does not exist on Windows, and
+            # SIGTERM is not a thing there either -- SIGBREAK is the
+            # nearest equivalent. Ask for whatever this OS actually has.
+            wanted = [signal.SIGINT]
+            for name in ("SIGTERM", "SIGBREAK"):
+                sig = getattr(signal, name, None)
+                if sig is not None:
+                    wanted.append(sig)
+            for sig in wanted:
                 try:
                     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig,
                                          self._on_signal)
                 except Exception:
-                    signal.signal(sig, lambda *_a: self._on_signal())
+                    try:
+                        signal.signal(sig, lambda *_a: self._on_signal())
+                    except (ValueError, OSError, AttributeError) as exc:
+                        log("no handler for %s: %s" % (sig, exc))
         self.win.present()
 
     def _on_signal(self) -> bool:
@@ -1998,12 +2015,42 @@ class GeorgeApp(Adw.Application):
         Adw.Application.do_shutdown(self)
 
 
+def _say(text: str) -> None:
+    """A windowed Windows build has no stdout at all -- sys.stdout is
+    None and writing to it raises. Fall back to a message box so
+    `George.exe --version` still answers instead of dying."""
+    if sys.stdout is not None:
+        try:
+            sys.stdout.write(text)
+            return
+        except Exception:
+            pass
+    if not osx.IS_WINDOWS:
+        return
+    # Launched from a terminal there IS a console -- the windowed build
+    # just is not attached to it. Attach to the parent and print like a
+    # normal program; only fall back to a dialog when double-clicked.
+    try:
+        import ctypes
+        if ctypes.windll.kernel32.AttachConsole(-1):
+            with open("CONOUT$", "w", encoding="utf-8") as con:
+                con.write(text)
+            return
+    except Exception:
+        pass
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, text, APP_NAME, 0x40)
+    except Exception:
+        pass
+
+
 def main() -> int:
     if "--version" in sys.argv:
-        sys.stdout.write("%s %s\n" % (APP_NAME, VERSION))
+        _say("%s %s\n" % (APP_NAME, VERSION))
         return 0
     if "--help" in sys.argv or "-h" in sys.argv:
-        sys.stdout.write(
+        _say(
             "george [--version] [prompt ...]\n"
             "\n"
             "  Local desktop AI. Starts ollama on launch and stops it on\n"
@@ -2017,7 +2064,7 @@ def main() -> int:
         return 0
     install_crash_handlers()
     claim_identity()
-    log("starting %s %s" % (APP_NAME, VERSION))
+    log("starting %s %s on %s" % (APP_NAME, VERSION, osx.describe()))
     return GeorgeApp().run(sys.argv)
 
 

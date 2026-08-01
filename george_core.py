@@ -17,10 +17,10 @@ import ast
 import html as _html
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -32,17 +32,17 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import george_platform as osx
+from george_platform import IS_WINDOWS
+
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 HOME = os.path.expanduser("~")
-CONFIG_DIR = os.path.join(
-    os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "george")
-DATA_DIR = os.path.join(
-    os.environ.get("XDG_DATA_HOME", os.path.join(HOME, ".local", "share")),
-    "george")
+CONFIG_DIR = osx.config_dir()
+DATA_DIR = osx.data_dir()
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 MEMORY_PATH = os.path.join(DATA_DIR, "memory.json")
 NOTES_PATH = os.path.join(DATA_DIR, "notes.md")
@@ -98,6 +98,7 @@ DEFAULTS: Dict[str, Any] = {
     "accent": "cyan",                # cyan | amber | violet | green | red
     "ui_density": "comfortable",     # comfortable | compact
     "animations": True,
+    "safe_graphics": False,          # cairo renderer; see the runtime hook
     "show_reasoning": True,
     "greet_on_start": True,
 
@@ -137,7 +138,7 @@ LIMITS: Dict[str, Tuple[float, float]] = {
 
 CHOICES: Dict[str, Tuple[str, ...]] = {
     "thinking": ("auto", "off", "on"),
-    "voice_engine": ("auto", "piper", "espeak", "none"),
+    "voice_engine": ("auto", "piper", "espeak", "sapi", "none"),
     "persona": ("jarvis", "plain", "blunt"),
     "watch_mode": ("advice", "banter", "quiet"),
     "accent": ("cyan", "amber", "violet", "green", "red", "white"),
@@ -274,8 +275,14 @@ def log(msg: str) -> None:
                 fh.write(line + "\n")
         except OSError:
             pass
-    if os.environ.get("GEORGE_DEBUG"):
-        sys.stderr.write(line + "\n")
+    # A GUI build on Windows is launched with no console attached, so
+    # sys.stderr is None and writing to it raises. Never let logging be
+    # the thing that crashes the app.
+    if os.environ.get("GEORGE_DEBUG") and sys.stderr is not None:
+        try:
+            sys.stderr.write(line + "\n")
+        except Exception:
+            pass
 
 
 def install_crash_handlers() -> None:
@@ -288,7 +295,11 @@ def install_crash_handlers() -> None:
     def hook(exc_type, exc, tb) -> None:
         log("UNCAUGHT %s: %s\n%s" % (exc_type.__name__, exc,
                                      "".join(traceback.format_tb(tb))[-4000:]))
-        sys.__excepthook__(exc_type, exc, tb)
+        if sys.stderr is not None:
+            try:
+                sys.__excepthook__(exc_type, exc, tb)
+            except Exception:
+                pass
 
     sys.excepthook = hook
 
@@ -313,16 +324,22 @@ def install_crash_handlers() -> None:
 #   2. It FAILS CLOSED.  If the string cannot be parsed, it is refused.
 # =====================================================================
 
-_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "busybox"}
-_WRAPPERS = {"sudo", "doas", "pkexec", "env", "nice", "ionice", "setsid",
-             "nohup", "time", "timeout", "stdbuf", "unbuffer", "command",
-             "exec", "xargs", "watch", "script", "chrt", "firejail"}
+_SHELLS = ({"sh", "bash", "zsh", "dash", "ksh", "fish", "busybox"} |
+           osx.WINDOWS_SHELLS)
+_WRAPPERS = ({"sudo", "doas", "pkexec", "env", "nice", "ionice", "setsid",
+              "nohup", "time", "timeout", "stdbuf", "unbuffer", "command",
+              "exec", "xargs", "watch", "script", "chrt", "firejail"} |
+             osx.WINDOWS_WRAPPERS)
 
+# Both operating systems' critical paths, always. The tables are merged
+# rather than switched on os.name for two reasons: the gate that ships
+# is then the gate that gets tested on whichever box runs the suite, and
+# for a destructive-command gate over-scanning is the safe direction.
 _CRITICAL_DIRS = {
     "/", "/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64",
     "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/usr",
     "/var", "/home", "/efi", "/boot/efi",
-}
+} | osx.WINDOWS_CRITICAL_TARGETS
 
 _DISK_SINKS = re.compile(
     r"^/dev/(sd[a-z]|nvme\d+n\d+|vd[a-z]|hd[a-z]|mmcblk\d+|loop\d+|disk|"
@@ -343,7 +360,7 @@ _HARD_NO = (
     re.compile(r"\biptables\b\s+-F|\bnft\b\s+flush\b", re.I),
     re.compile(r"\bcrypsetup\b|\bcryptsetup\b\s+(erase|luksErase)", re.I),
     re.compile(r"\bhistory\b\s+-c", re.I),
-)
+) + osx.WINDOWS_HARD_NO
 
 # curl|bash and friends: piping the network straight into a shell.
 _PIPE_TO_SHELL = re.compile(
@@ -355,6 +372,16 @@ def _normalise(command: str) -> str:
     s = command.replace("${IFS}", " ").replace("$IFS", " ")
     s = s.replace("\r", "\n")
     return s
+
+
+def _decaret(command: str) -> str:
+    """cmd.exe's escape character is `^`, so `de^l /s /q C:\\` runs del.
+
+    The gate checks the string both ways -- as typed and with the carets
+    removed -- because only one of those two readings has to be
+    dangerous for the command to be dangerous.
+    """
+    return command.replace("^", "")
 
 
 def _lift_substitutions(command: str) -> List[str]:
@@ -392,15 +419,23 @@ def _split_subcommands(command: str) -> List[str]:
     return [p.strip() for p in parts if p and p.strip()]
 
 
+def _argv_all(sub: str) -> Optional[List[List[str]]]:
+    """Every way this subcommand could be read. None = refuse.
+
+    POSIX and Windows disagree about the backslash, so `del C:\\Windows`
+    is two different argvs depending on who is doing the splitting. The
+    gate looks at all of them.
+    """
+    return osx.argv_variants(sub)
+
+
 def _argv(sub: str) -> Optional[List[str]]:
-    try:
-        return shlex.split(sub, comments=True)
-    except ValueError:
-        return None
+    variants = osx.argv_variants(sub)
+    return variants[0] if variants else None
 
 
 def _base(arg: str) -> str:
-    return os.path.basename(arg.strip().strip("'\""))
+    return osx.base_name(arg)
 
 
 def _strip_wrappers(args: List[str]) -> List[str]:
@@ -422,16 +457,11 @@ def _strip_wrappers(args: List[str]) -> List[str]:
 
 
 def _norm_target(t: str) -> str:
-    t = t.strip().strip("'\"")
-    # $HOME and ~ are the same directory; a gate that only knows one of
-    # them is a gate you get past by typing the other.
-    t = t.replace("${HOME}", HOME).replace("$HOME", HOME)
-    if t.startswith("~"):
-        t = HOME + t[1:]
-    t = re.sub(r"/+", "/", t)
-    if len(t) > 1:
-        t = t.rstrip("/")
-    return t
+    # $HOME, ${HOME}, ~ and %USERPROFILE% are all the same directory; a
+    # gate that only knows one spelling is a gate you get past by typing
+    # another. Windows paths are folded to lower case because its file
+    # system does not care about it and neither can this.
+    return osx.norm_target(t)
 
 
 def _is_catastrophic_target(t: str) -> bool:
@@ -463,33 +493,44 @@ _DANGEROUS_CMDS = {
     "mv", "cp", "chmod", "chown", "chgrp", "truncate", "tee", "ln",
     "shutdown", "poweroff", "halt", "reboot", "init", "pacman", "apt",
     "apt-get", "dnf", "zypper",
-}
+} | osx.WINDOWS_DANGEROUS_CMDS
 
 
-def _sub_is_catastrophic(args: List[str]) -> bool:
+def _sub_is_catastrophic(args: List[str], _depth: int = 0) -> bool:
     peeled = _strip_wrappers(args)
-    if _check_argv(peeled):
+    if _check_argv(peeled, _depth):
         return True
     for i, tok in enumerate(args):
         if i == 0:
             continue
-        base = _base(tok)
+        base = _base(tok).lower()
         if base in _DANGEROUS_CMDS or base.startswith("mkfs."):
-            if _check_argv(args[i:]):
+            if _check_argv(args[i:], _depth):
                 return True
     return False
 
 
-def _check_argv(args: List[str]) -> bool:
+def _check_argv(args: List[str], _depth: int = 0) -> bool:
     if not args:
         return False
     cmd = _base(args[0])
     rest = args[1:]
 
-    if cmd in _SHELLS:
+    if cmd in _SHELLS or cmd.lower() in _SHELLS:
         for i, a in enumerate(rest):
-            if a in ("-c", "-lc", "-ic") and i + 1 < len(rest):
-                return is_destructive_command(rest[i + 1], _depth=1)
+            low = a.lower()
+            if low in osx.ENCODED_FLAGS and i + 1 < len(rest):
+                # -EncodedCommand is base64 UTF-16LE. Decode it or refuse:
+                # an inner command this gate cannot read is not a command
+                # this gate may approve.
+                inner = osx.decode_powershell(rest[i + 1])
+                if inner is None:
+                    return True
+                return is_destructive_command(inner, _depth + 1)
+            if (a in ("-c", "-lc", "-ic") or low in osx.INLINE_FLAGS) and \
+                    i + 1 < len(rest):
+                return is_destructive_command(" ".join(rest[i + 1:]),
+                                              _depth + 1)
         return False
 
     if cmd == "rm":
@@ -521,6 +562,36 @@ def _check_argv(args: List[str]) -> bool:
                 return True
         return False
 
+    # ---- Windows spellings of the same three ideas: delete a tree,
+    # ---- overwrite something important, hand ownership away.
+    low = cmd.lower()
+    if low in ("del", "erase", "rd", "rmdir", "remove-item", "ri"):
+        flags = " ".join(a.lower() for a in rest if a.startswith(("-", "/")))
+        recursive = ("/s" in flags or "-recurse" in flags or "/q" in flags or
+                     low in ("rd", "rmdir", "remove-item", "ri"))
+        for t in [a for a in rest if not a.startswith(("-", "/"))]:
+            if _is_catastrophic_target(t):
+                return True
+            norm = _norm_target(t)
+            # `del C:\*` or `Remove-Item D:\ -Recurse` -- one level below
+            # a drive root with a wildcard is the whole drive
+            if recursive and re.match(r"^[a-z]:\\(\*|\*\.\*)?$", norm):
+                return True
+        return False
+
+    if low in ("move", "copy", "xcopy", "robocopy", "move-item",
+               "rename-item", "ren", "rename"):
+        for t in [a for a in rest if not a.startswith(("-", "/"))]:
+            if _is_catastrophic_target(t):
+                return True
+        return False
+
+    if low in ("takeown", "icacls", "cacls", "attrib"):
+        for t in [a for a in rest if not a.startswith(("-", "/", "+"))]:
+            if _is_catastrophic_target(t):
+                return True
+        return False
+
     if cmd in ("shutdown", "poweroff", "halt", "reboot", "init"):
         return True
 
@@ -542,20 +613,27 @@ def is_destructive_command(command: str, _depth: int = 0) -> bool:
 
     if _FORK_BOMB.search(s):
         return True
-    for rx in _HARD_NO:
-        if rx.search(s):
-            return True
+    # `de^l /s /q C:\` is del. Both readings have to be clean, not one.
+    bare = _decaret(s)
+    for candidate in ({s, bare} if bare != s else {s}):
+        for rx in _HARD_NO:
+            if rx.search(candidate):
+                return True
 
     for inner in _lift_substitutions(s):
         if is_destructive_command(inner, _depth + 1):
             return True
 
+    if bare != s and is_destructive_command(bare, _depth + 1):
+        return True
+
     for sub in _split_subcommands(s):
-        args = _argv(sub)
-        if args is None:
+        variants = _argv_all(sub)
+        if variants is None:
             return True                   # unparseable -> refuse
-        if _sub_is_catastrophic(args):
-            return True
+        for args in variants:
+            if _sub_is_catastrophic(args, _depth):
+                return True
 
     # redirection into a device node
     if re.search(r">\s*/dev/(sd|nvme|vd|hd|mmcblk)", s, re.I):
@@ -564,7 +642,9 @@ def is_destructive_command(command: str, _depth: int = 0) -> bool:
 
 
 def is_network_pipe_to_shell(command: str) -> bool:
-    return bool(_PIPE_TO_SHELL.search(_normalise(command)))
+    s = _normalise(command)
+    return bool(_PIPE_TO_SHELL.search(s) or
+                osx.WINDOWS_PIPE_TO_SHELL.search(s))
 
 
 # Commands George may run on his own.
@@ -737,12 +817,23 @@ READ_ONLY: Dict[str, Optional[Callable[[List[str]], bool]]] = {
     "snap": _ok_pkg_query, "pamac": _ok_pkg_query,
 }
 
+# The Windows half of the same list: dir, systeminfo, tasklist, ipconfig,
+# the read-only PowerShell cmdlets and the query-only forms of netsh, sc,
+# reg and winget. Merged in rather than swapped, so one allowlist ships
+# and one allowlist gets tested.
+READ_ONLY.update(osx.WINDOWS_READ_ONLY)
+
 # If any of these appear anywhere in the command it is not auto-run,
 # whatever the command name says. A redirect writes; a substitution runs
 # something this gate never saw; `&` detaches it from the timeout.
-_NO_AUTORUN_CHARS = (">", "<", "$(", "`", "${", "&")
+_NO_AUTORUN_CHARS = ((">", "<", "$(", "`", "${", "&") +
+                     osx.WINDOWS_NO_AUTORUN_CHARS)
 
-_PRIV = ("sudo", "doas", "pkexec", "su", "runuser", "setpriv")
+_PRIV = ("sudo", "doas", "pkexec", "su", "runuser", "setpriv",
+         "runas", "gsudo", "elevate")
+
+
+_MISSING = object()
 
 
 def command_needs_confirmation(command: str, cfg: Dict[str, Any]) -> bool:
@@ -761,20 +852,26 @@ def command_needs_confirmation(command: str, cfg: Dict[str, Any]) -> bool:
     if not subs:
         return True
     for sub in subs:
-        args = _argv(sub)
-        if not args:
+        variants = _argv_all(sub)
+        if not variants:
             return True
-        if any(_base(a) in _PRIV for a in args):
-            return True                 # never escalate on its own
-        args = _strip_wrappers(args)
-        if not args:
-            return True
-        base = _base(args[0])
-        if base not in READ_ONLY:
-            return True
-        check = READ_ONLY[base]
-        if check is not None and not check(args):
-            return True
+        # Every reading has to be read-only, not just the convenient one.
+        for args in variants:
+            if not args:
+                return True
+            if any(_base(a).lower() in _PRIV for a in args):
+                return True             # never escalate on its own
+            args = _strip_wrappers(args)
+            if not args:
+                return True
+            base = _base(args[0])
+            check = READ_ONLY.get(base, _MISSING)
+            if check is _MISSING:
+                check = READ_ONLY.get(base.lower(), _MISSING)
+            if check is _MISSING:
+                return True
+            if check is not None and not check(args):
+                return True
     return False
 
 
@@ -785,6 +882,9 @@ def inside_sandbox(path: str, cfg: Dict[str, Any]) -> bool:
         target = os.path.realpath(os.path.expanduser(path))
     except OSError:
         return False
+    # NTFS does not care about case, so a check that does is a check you
+    # walk straight past by typing C:\USERS instead of C:\Users.
+    root, target = os.path.normcase(root), os.path.normcase(target)
     return target == root or target.startswith(root + os.sep)
 
 
@@ -1284,14 +1384,17 @@ def fetch_news(feeds: List[List[str]], per_feed: int = 5,
 def run_shell(command: str, timeout: int = 60,
               cwd: Optional[str] = None) -> Tuple[int, str]:
     try:
+        # Bytes, not text=True. cmd.exe writes the OEM code page and
+        # Python would decode it as ANSI, turning every box-drawing
+        # character and accented filename into noise.
         proc = subprocess.run(command, shell=True, capture_output=True,
-                              text=True, timeout=timeout, cwd=cwd,
-                              errors="replace")
+                              timeout=timeout, cwd=cwd, **osx.run_kwargs())
     except subprocess.TimeoutExpired:
         return 124, "[timed out after %ds]" % timeout
     except Exception as exc:                       # pragma: no cover
         return 1, "[failed to launch: %s]" % exc
-    out = (proc.stdout or "") + (proc.stderr or "")
+    out = osx.decode_output(proc.stdout or b"") + \
+        osx.decode_output(proc.stderr or b"")
     return proc.returncode, out.strip()
 
 
@@ -1314,7 +1417,26 @@ class CpuMeter:
         self._prev: Optional[Tuple[int, int]] = None
         self._lock = threading.Lock()
 
+    def _sample_windows(self) -> float:
+        """GetSystemTimes deltas. The trap in that API is that kernel
+        time INCLUDES idle time, so busy is total minus idle, not
+        kernel plus user minus idle."""
+        now = osx.win_cpu_times()
+        if now is None:
+            return 0.0
+        idle, total = now
+        prev = getattr(self, "_win_prev", None)
+        self._win_prev = now
+        if prev is None:
+            return 0.0
+        d_idle, d_total = idle - prev[0], total - prev[1]
+        if d_total <= 0:
+            return 0.0
+        return max(0.0, min(100.0, 100.0 * (d_total - d_idle) / d_total))
+
     def sample(self) -> float:
+        if IS_WINDOWS:
+            return self._sample_windows()
         line = _read_first("/proc/stat").split("\n")[0]
         parts = line.split()
         if len(parts) < 5 or parts[0] != "cpu":
@@ -1348,8 +1470,11 @@ def machine_summary() -> str:
     session type in particular change what the right answer actually is.
     """
     st = system_status()
-    bits = ["%s on %s" % (st.get("distro", "Linux"), st.get("arch", "?")),
-            "kernel %s" % st.get("kernel", "?")]
+    bits = ["%s on %s" % (st.get("distro", "this machine"),
+                          st.get("arch", "?"))]
+    if st.get("kernel"):
+        bits.append(("build %s" if IS_WINDOWS else "kernel %s")
+                    % st["kernel"])
     if st.get("desktop"):
         bits.append("%s%s" % (st["desktop"],
                               "/" + st["session"] if st.get("session")
@@ -1373,6 +1498,75 @@ def machine_summary() -> str:
 
 
 def system_status() -> Dict[str, str]:
+    if IS_WINDOWS:
+        return _system_status_windows()
+    return _system_status_posix()
+
+
+def _system_status_windows() -> Dict[str, str]:
+    """Same keys as the POSIX one, from ctypes and the registry.
+
+    Deliberately no subprocess in the common path: this runs on the HUD
+    timer, and spawning cmd every couple of seconds in a windowed app is
+    both slow and visible.
+    """
+    st: Dict[str, str] = {}
+    st["host"] = platform.node() or "?"
+    st["distro"] = osx.win_os_name()
+    st["kernel"] = platform.version()
+    st["arch"] = platform.machine()
+    desktop, session = osx.win_session()
+    st["desktop"] = desktop
+    st["session"] = session
+    st["shell"] = os.path.basename(os.environ.get("COMSPEC", "cmd.exe"))
+
+    secs = int(osx.win_uptime())
+    st["uptime"] = "%dd %dh %dm" % (secs // 86400, (secs % 86400) // 3600,
+                                    (secs % 3600) // 60)
+
+    model = osx.win_cpu_model()
+    if model:
+        st["cpu_model"] = model
+    gpu = osx.win_gpu()
+    if gpu:
+        st["gpu"] = gpu[:70]
+    cpu = _cpu_meter.sample()
+    st["cpu"] = "%d%%" % int(round(cpu))
+    st["cpu_pct"] = str(int(round(cpu)))
+    st["cores"] = str(os.cpu_count() or 1)
+    # Windows has no load average. Saying so beats inventing one.
+    st["load"] = "n/a"
+
+    mem = osx.win_memory()
+    total, avail = mem.get("total", 0), mem.get("avail", 0)
+    if total:
+        used = total - avail
+        st["memory"] = "%.1f / %.1f GiB (%d%%)" % (
+            used / 1073741824.0, total / 1073741824.0,
+            round(100.0 * used / total))
+        st["mem_pct"] = str(round(100.0 * used / total))
+    sw_total, sw_avail = mem.get("swap_total", 0), mem.get("swap_avail", 0)
+    if sw_total and sw_total > total:
+        # Windows reports commit limit, not a swap file size; the part
+        # above physical RAM is the closest honest equivalent.
+        st["swap"] = "%.1f / %.1f GiB" % (
+            (sw_total - sw_avail) / 1073741824.0,
+            (sw_total - total) / 1073741824.0)
+    try:
+        du = shutil.disk_usage(os.environ.get("SystemDrive", "C:") + "\\")
+        st["disk"] = "%.0f / %.0f GiB free on %s" % (
+            du.free / 1073741824.0, du.total / 1073741824.0,
+            os.environ.get("SystemDrive", "C:"))
+        st["disk_pct"] = str(round(100.0 * (du.total - du.free) / du.total))
+    except OSError:
+        pass
+    battery = osx.win_battery()
+    if battery:
+        st["battery"] = battery
+    return st
+
+
+def _system_status_posix() -> Dict[str, str]:
     st: Dict[str, str] = {}
     uname = os.uname()
     st["host"] = uname.nodename
@@ -1522,11 +1716,15 @@ def open_in_browser(url: str, cfg: Dict[str, Any]) -> str:
     if not re.match(r"^https?://", url):
         url = "https://" + url
     browser = (cfg.get("browser") or "").strip()
+    if not browser and IS_WINDOWS:
+        result = osx.win_open(url)
+        return ("opened %s on screen" % url) if result.startswith("opened") \
+            else result
     cmd = [browser, url] if browser else ["xdg-open", url]
     try:
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+                         **osx.spawn_kwargs(detach=True))
         return "opened %s on screen" % url
     except Exception as exc:
         return "could not open browser: %s" % exc
@@ -1536,11 +1734,14 @@ def launch_app(name: str) -> str:
     name = name.strip()
     if not name:
         return "no application given"
+    if IS_WINDOWS:
+        return osx.win_launch(name)
     exe = shutil.which(name)
     if exe:
         try:
             subprocess.Popen([exe], stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True)
+                             stderr=subprocess.DEVNULL,
+                             **osx.spawn_kwargs(detach=True))
             return "launched %s" % name
         except Exception as exc:
             return "launch failed: %s" % exc
@@ -1553,6 +1754,9 @@ def launch_app(name: str) -> str:
 
 
 def notify(title: str, body: str = "") -> None:
+    if IS_WINDOWS:
+        osx.win_notify(title, body)
+        return
     if shutil.which("notify-send"):
         try:
             subprocess.Popen(["notify-send", "-a", APP_NAME, title, body],
@@ -1564,6 +1768,20 @@ def notify(title: str, body: str = "") -> None:
 
 def media_control(action: str) -> str:
     action = action.strip().lower()
+    if IS_WINDOWS:
+        # The same WM_APPCOMMAND messages a keyboard's media keys send,
+        # so it works with whatever mixer and player the box has rather
+        # than needing a particular one installed.
+        if action in ("volume_up", "volume_down", "mute"):
+            steps = 1 if action == "mute" else 3
+            ok = osx.win_appcommand(action, steps)
+            return ("volume %s" % action.replace("_", " ")) if ok else \
+                "could not reach the volume control"
+        if action == "volume":
+            return "Windows does not expose the master level without extra tooling"
+        if osx.win_appcommand(action):
+            return "player: %s" % action
+        return "unknown media action %r" % action
     if action in ("volume_up", "volume_down", "mute", "volume"):
         if shutil.which("wpctl"):
             arg = {"volume_up": "5%+", "volume_down": "5%-"}.get(action, "")
@@ -1599,6 +1817,8 @@ def media_control(action: str) -> str:
 
 
 def clipboard_read() -> str:
+    if IS_WINDOWS:
+        return osx.win_clipboard_get()
     for cmd in ("wl-paste -n", "xclip -selection clipboard -o", "xsel -b"):
         if shutil.which(cmd.split()[0]):
             rc, out = run_shell(cmd, timeout=10)
@@ -1608,6 +1828,8 @@ def clipboard_read() -> str:
 
 
 def clipboard_write(text: str) -> str:
+    if IS_WINDOWS:
+        return osx.win_clipboard_set(text)
     for cmd in ("wl-copy", "xclip -selection clipboard", "xsel -b -i"):
         exe = cmd.split()[0]
         if shutil.which(exe):
@@ -1624,6 +1846,8 @@ def clipboard_write(text: str) -> str:
 def take_screenshot() -> Tuple[bool, str]:
     path = os.path.join(tempfile.gettempdir(),
                         "george-shot-%d.png" % int(time.time()))
+    if IS_WINDOWS:
+        return osx.win_screenshot(path)
     candidates = [
         ("grim", "grim %s" % shlex.quote(path)),
         ("spectacle", "spectacle -b -n -o %s" % shlex.quote(path)),
@@ -1751,6 +1975,8 @@ def find_files(root: str, pattern: str, cfg: Dict[str, Any],
 
 def list_processes(sort_by: str = "cpu", limit: int = 12) -> str:
     """Top processes via ps, with a /proc fallback if ps is missing."""
+    if IS_WINDOWS:
+        return osx.win_processes(sort_by, limit)
     key = "-%cpu" if str(sort_by).lower().startswith("cpu") else "-%mem"
     if shutil.which("ps"):
         rc, out = run_shell(
@@ -1779,6 +2005,8 @@ def list_processes(sort_by: str = "cpu", limit: int = 12) -> str:
 
 
 def network_status() -> Dict[str, str]:
+    if IS_WINDOWS:
+        return osx.win_network()
     """Interfaces, addresses and default route, read from the tools that
     exist rather than assuming any one of them does."""
     out: Dict[str, str] = {}
@@ -1822,6 +2050,25 @@ def network_status() -> Dict[str, str]:
 
 
 def volume_control(action: str, level: int = 5) -> str:
+    if IS_WINDOWS:
+        act = action.strip().lower()
+        if act in ("up", "raise", "louder"):
+            key, steps = "volume_up", max(1, int(round(level / 2.0)))
+        elif act in ("down", "lower", "quieter"):
+            key, steps = "volume_down", max(1, int(round(level / 2.0)))
+        elif act in ("mute", "unmute", "toggle"):
+            key, steps = "mute", 1
+        elif act in ("get", "status", "level"):
+            # Reading the master level needs the COM audio endpoint API,
+            # which is a lot of hand-written vtable calls for one number.
+            # Saying so beats returning a made-up figure.
+            return ("Windows does not report the master volume without "
+                    "extra tooling - I can still turn it up, down or mute")
+        else:
+            return "unknown volume action %r" % action
+        if osx.win_appcommand(key, steps):
+            return "volume %s" % key.replace("volume_", "").replace("_", " ")
+        return "could not reach the volume control"
     """pipewire, then pulse, then alsa.  Returns what actually happened."""
     action = str(action or "").strip().lower()
     level = max(1, min(int(level or 5), 50))
@@ -1874,6 +2121,8 @@ POWER_ACTIONS = {
 
 
 def power_action(action: str) -> str:
+    if IS_WINDOWS:
+        return osx.win_power(action)
     """Session control.  The caller is responsible for confirming --
     every one of these is disruptive, so nothing here is automatic."""
     action = str(action or "").strip().lower()
@@ -1900,6 +2149,8 @@ def open_path(path: str, cfg: Dict[str, Any]) -> str:
     if not inside_sandbox(path, cfg):
         return "REFUSED: %s is outside the sandbox root" % path
     try:
+        if IS_WINDOWS:
+            return osx.win_open(path)
         subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
     except Exception as exc:
@@ -1908,6 +2159,20 @@ def open_path(path: str, cfg: Dict[str, Any]) -> str:
 
 
 def disk_report() -> str:
+    if IS_WINDOWS:
+        lines = ["DRIVE        USED       FREE      TOTAL   USE%"]
+        for drive in osx.win_drives():
+            try:
+                du = shutil.disk_usage(drive)
+            except OSError:
+                continue
+            gb = 1073741824.0
+            pct = round(100.0 * (du.total - du.free) / du.total) if du.total \
+                else 0
+            lines.append("%-8s %7.0f GB %7.0f GB %7.0f GB %4d%%" % (
+                drive, (du.total - du.free) / gb, du.free / gb,
+                du.total / gb, pct))
+        return "\n".join(lines)
     if shutil.which("df"):
         rc, out = run_shell("df -h -x tmpfs -x devtmpfs -x squashfs", timeout=8)
         if rc == 0 and out.strip():
@@ -1954,6 +2219,8 @@ _PKG_NAMES = {
 
 
 def distro_id() -> Tuple[str, str]:
+    if IS_WINDOWS:
+        return "windows", "windows"
     ident = like = ""
     for line in _read_first("/etc/os-release").splitlines():
         if line.startswith("ID="):
@@ -1964,6 +2231,8 @@ def distro_id() -> Tuple[str, str]:
 
 
 def detect_pkg_mgr() -> Optional[str]:
+    if IS_WINDOWS:
+        return osx.win_pkg_mgr()
     ident, like = distro_id()
     family = (ident + " " + like).lower()
     for token, mgr in (("arch", "pacman"), ("debian", "apt-get"),
@@ -1978,7 +2247,28 @@ def detect_pkg_mgr() -> Optional[str]:
     return None
 
 
+_WIN_PKG_NAMES = {
+    "winget": {"ollama": "winget install --id Ollama.Ollama -e",
+               "espeak": "winget install --id eSpeak-NG.eSpeak-NG -e",
+               "ffmpeg": "winget install --id Gyan.FFmpeg -e"},
+    "choco": {"ollama": "choco install ollama -y",
+              "espeak": "choco install espeak -y",
+              "ffmpeg": "choco install ffmpeg -y"},
+    "scoop": {"ollama": "scoop install ollama",
+              "espeak": "scoop install espeak-ng",
+              "ffmpeg": "scoop install ffmpeg"},
+}
+
+
 def install_hint(what: str) -> str:
+    if IS_WINDOWS:
+        mgr = osx.win_pkg_mgr()
+        hint = _WIN_PKG_NAMES.get(mgr or "", {}).get(what, "")
+        if hint:
+            return hint
+        if what == "ollama":
+            return "download it from https://ollama.com/download/windows"
+        return "install %s and put it on your PATH" % what
     mgr = detect_pkg_mgr()
     if not mgr:
         return "install %s with your package manager" % what
@@ -2013,6 +2303,11 @@ class OllamaSupervisor:
     # ---- helpers ------------------------------------------------------
     @staticmethod
     def systemd_owns() -> bool:
+        """True when something other than George is responsible for the
+        daemon -- systemd on Linux, the Ollama tray app or its service on
+        Windows. Either way George uses it and does not kill it."""
+        if IS_WINDOWS:
+            return OllamaSupervisor._windows_service_owns()
         if not shutil.which("systemctl"):
             return False
         for scope in ("--user", "--system"):
@@ -2027,8 +2322,27 @@ class OllamaSupervisor:
         return False
 
     @staticmethod
+    def _windows_service_owns() -> bool:
+        exe = osx.find_binary("tasklist")
+        if not exe:
+            return False
+        try:
+            proc = subprocess.run([exe, "/FO", "CSV", "/NH"],
+                                  capture_output=True, timeout=15,
+                                  **osx.run_kwargs())
+        except Exception:
+            return False
+        listing = osx.decode_output(proc.stdout).lower()
+        # "ollama app.exe" is the tray application, which serves on 11434
+        # itself. Ours is a bare "ollama.exe serve" we started.
+        return "ollama app.exe" in listing
+
+    @staticmethod
     def binary() -> Optional[str]:
-        return shutil.which("ollama")
+        # Ollama's Windows installer drops the exe in LOCALAPPDATA and
+        # does not always refresh the PATH a running GUI process
+        # inherited, so which() alone finds nothing on a fresh install.
+        return osx.find_binary("ollama")
 
     def wait_healthy(self, seconds: float = 40.0) -> bool:
         deadline = time.time() + seconds
@@ -2069,7 +2383,7 @@ class OllamaSupervisor:
         try:
             self.proc = subprocess.Popen(
                 [exe, "serve"], stdout=handle, stderr=handle,
-                stdin=subprocess.DEVNULL, start_new_session=True)
+                stdin=subprocess.DEVNULL, **osx.spawn_kwargs(detach=True))
         except Exception as exc:
             self.state = "failed"
             return False, "could not start ollama: %s" % exc
@@ -2098,25 +2412,17 @@ class OllamaSupervisor:
         if proc.poll() is not None:
             return
         log("stopping the ollama we started (pid %d)" % proc.pid)
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except Exception:
-            try:
-                proc.terminate()
-            except Exception:
-                return
+        # The wrapper is not the daemon: `ollama serve` forks a runner
+        # that holds the model and the port. Kill the whole tree or the
+        # next launch finds 11434 already taken.
+        if not osx.kill_tree(proc, force=False):
+            return
         try:
             proc.wait(timeout=8)
             return
         except subprocess.TimeoutExpired:
             pass
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+        osx.kill_tree(proc, force=True)
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -2124,7 +2430,8 @@ class OllamaSupervisor:
 
     def status_line(self) -> str:
         return {"owned": "started by George", "external": "already running",
-                "systemd": "systemd", "missing": "not installed",
+                "systemd": "the Ollama app" if IS_WINDOWS else "systemd",
+                "missing": "not installed",
                 "failed": "failed to start"}.get(self.state, "unknown")
 
 

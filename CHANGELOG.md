@@ -1,5 +1,72 @@
 # George changelog
 
+## 2.4.0 - Windows
+
+George now runs natively on Windows, and the repo builds a real `.exe`
+with GTK4 inside it.
+
+- **New `george_platform.py`.** One module knows which OS this is;
+  everything else stays written once. GTK-free like the core, so it is
+  testable headless, and its pure parts take an explicit `windows=`
+  argument so Windows behaviour can be checked from Linux.
+- **The safety tables are merged, not switched.** The Windows
+  destructive patterns are live on Linux and vice versa. For a gate,
+  over-scanning is the safe direction - and it means the gate that ships
+  is the gate the suite actually exercises, whichever box runs it.
+  Newly refused: `format C:`, `diskpart`, `vssadmin delete shadows`,
+  `reg delete HKLM\...`, `Remove-Item -Recurse C:\`, `Clear-Disk`,
+  `Format-Volume`, `takeown /f C:\`, `icacls C:\ /reset`, `bcdedit /set`,
+  `sc delete`, `wevtutil cl`, `cipher /w`, `net user ... /delete`.
+- **Three new ways past a gate, closed.** Commands are split with BOTH
+  POSIX and Windows quoting rules and every reading has to be clean,
+  because `del C:\Windows` is two different argvs depending on who
+  splits it. `de^l /s /q C:\` is checked with the carets stripped as
+  well as as typed. `powershell -EncodedCommand <base64>` is decoded and
+  recursed into; if it will not decode, it is refused.
+- **The Windows read-only allowlist**: dir, systeminfo, tasklist,
+  ipconfig, netstat, where, findstr, tree, certutil -hashfile, the
+  query-only forms of reg/sc/netsh/wmic/powercfg/winget, and a named set
+  of read-only PowerShell cmdlets. `Format-` is deliberately not
+  prefix-matched: Format-Table is harmless and Format-Volume wipes a
+  disk.
+- **Facts come from ctypes and the registry, not `wmic`** - which
+  Windows 11 24H2 removed. CPU load from GetSystemTimes, RAM from
+  GlobalMemoryStatusEx, uptime from GetTickCount64, battery from
+  GetSystemPowerStatus, GPU from EnumDisplayDevices, and the real
+  Windows 11 build number rather than the ProductName that still says
+  10.
+- **Voice works on a bare Windows install.** SAPI via System.Speech is
+  the default engine there - it is already present on every Windows and
+  sounds like a person; piper is still preferred when its model is on
+  disk. Playback goes through `winsound`, so a 60ms UI blip no longer
+  costs a process launch.
+- Clipboard through the real Win32 clipboard with a PowerShell fallback;
+  screen capture across the whole virtual desktop; volume and media keys
+  through WM_APPCOMMAND, the same messages a keyboard's media keys send.
+- **Every subprocess gets CREATE_NO_WINDOW.** Miss one and a windowed
+  build flashes a black console box every time George checks the time.
+- **Ollama teardown kills the process tree.** `ollama serve` forks a
+  runner that holds the model and the port; killing the wrapper alone
+  left 11434 taken. George still only stops a daemon he started - if the
+  Ollama tray app is running, he uses it and leaves it alone.
+- `--version` attaches to the terminal that launched it, and falls back
+  to a dialog only when double-clicked, because a windowed build has no
+  stdout at all.
+- **New `tests/test_windows.py`**: 251 checks that run on Linux -
+  destructive gate, auto-run gate, parsers, dispatch, and an AST audit
+  that hasattr-checks every `osx.*` attribute in every module. pyflakes
+  does not resolve those, so without it a renamed function would only
+  surface at run time, on Windows, where nobody is watching. It found
+  three real gate bugs on its first run.
+- **New `.github/workflows/windows.yml`**: MSYS2 UCRT64 -> PyInstaller
+  -> Inno Setup installer plus a portable zip, with a smoke test that
+  runs the built exe and fails the build if the typelibs, schemas,
+  pixbuf loaders or icon theme are missing from the bundle.
+- **New `install.ps1`**: `irm ... | iex`, the Windows counterpart to
+  install.sh. Same shape, same manners - the uninstall asks separately
+  before touching your notes and that question is never answered by
+  `GEORGE_YES`.
+
 ## 2.3.0
 
 - **He knows what he is running on.** The system prompt now carries a

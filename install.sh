@@ -30,7 +30,7 @@ ICON_DIR="${PREFIX}/share/icons/hicolor/scalable/apps"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/george"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/george"
 
-REQUIRED_FILES=(george.py george_core.py george_tools.py george_voice.py george_theme.py george_hud.py george_vision.py george_sound.py)
+REQUIRED_FILES=(george.py george_core.py george_platform.py george_tools.py george_voice.py george_theme.py george_hud.py george_vision.py george_sound.py)
 OPTIONAL_FILES=(README.md george.svg install.sh)
 
 VOICE="${GEORGE_VOICE:-en_GB-alan-medium}"

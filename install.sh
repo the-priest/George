@@ -31,7 +31,7 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/george"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/george"
 
 REQUIRED_FILES=(george.py george_core.py george_platform.py george_tools.py george_voice.py george_theme.py george_hud.py george_vision.py george_sound.py)
-OPTIONAL_FILES=(README.md george.svg install.sh)
+OPTIONAL_FILES=(README.md george.png install.sh)
 
 VOICE="${GEORGE_VOICE:-en_GB-alan-medium}"
 VISION="${GEORGE_VISION:-moondream}"
@@ -358,8 +358,8 @@ install_files() {
   done
   [ -f "${SRC_DIR}/install.sh" ] && \
     install -m 0755 "${SRC_DIR}/install.sh" "${APP_DIR}/install.sh"
-  [ -f "${SRC_DIR}/george.svg" ] && \
-    install -m 0644 "${SRC_DIR}/george.svg" "${ICON_DIR}/com.thepriest.george.svg"
+  [ -f "${SRC_DIR}/george.png" ] && \
+    install -m 0644 "${SRC_DIR}/george.png" "${APP_DIR}/george.png"
   # a v1/v2 install wrote org.* -- the ID never matched the app, so the
   # window fell back to the generic python icon. Clear the stale pair.
   rm -f "${DESKTOP_DIR}/org.thepriest.george.desktop" \
@@ -507,7 +507,7 @@ Name=George
 GenericName=Local AI Assistant
 Comment=Fully local desktop AI - Ollama, no API keys, no cloud
 Exec=${BIN_DIR}/george
-Icon=com.thepriest.george
+Icon=${APP_DIR}/george.png
 Terminal=false
 Categories=Utility;Development;
 Keywords=ai;assistant;ollama;local;jarvis;

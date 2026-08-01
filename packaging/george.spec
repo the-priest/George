@@ -110,7 +110,7 @@ for theme in ("Adwaita", "hicolor"):
             datas.append((src, os.path.join("share", rel)))
 
 # George's own files
-datas.append((os.path.join(ROOT, "george.svg"), "."))
+datas.append((os.path.join(ROOT, "george.png"), "."))
 datas.append((os.path.join(ROOT, "packaging", "george-safe.cmd"), "."))
 for extra in ("README.md", "CHANGELOG.md"):
     if os.path.exists(os.path.join(ROOT, extra)):

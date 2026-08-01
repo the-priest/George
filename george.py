@@ -365,6 +365,22 @@ class GeorgeWindow(Adw.ApplicationWindow):
                 provider.load_from_data(FALLBACK_CSS)
             except Exception:
                 return
+        # If a bundled george.png exists next to the script, add a background
+        # CSS rule that uses it as a large centered background for the chat.
+        try:
+            bg = os.path.join(os.path.dirname(__file__), "george.png")
+            if os.path.isfile(bg):
+                bg_url = "file://" + os.path.abspath(bg)
+                extra = ('\n.background { background-image: url("%s"); '
+                         'background-size: cover; background-position: center; '
+                         'background-repeat: no-repeat; opacity: 0.06; }\n' % bg_url)
+                try:
+                    provider.load_from_data(extra.encode("utf-8"))
+                except Exception as _:
+                    # Non-fatal: the main stylesheet already provides the UI
+                    log("could not load background image css: %s" % bg)
+        except Exception:
+            pass
         display = Gdk.Display.get_default()
         if display is None:
             log("no display; skipping stylesheet")

@@ -47,6 +47,11 @@ port = srv.server_address[1]
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 cfg = dict(G.DEFAULTS)
+# This file counts the LOOP's own model calls. The verification pass adds
+# one on tool-backed answers, and the router removes one -- both real,
+# both measured in their own files. Isolate them here.
+cfg["verify"] = "off"
+cfg["router"] = False
 cfg["ollama_url"] = "http://127.0.0.1:%d" % port
 cfg["voice_enabled"] = False
 agent = G.Agent(cfg, G.MemoryStore(), G.TextToSpeech(cfg))

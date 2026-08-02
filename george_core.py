@@ -39,7 +39,7 @@ from george_platform import IS_WINDOWS
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "3.4.0"
+VERSION = "3.9.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = osx.config_dir()
@@ -53,8 +53,17 @@ LOG_PATH = os.path.join(DATA_DIR, "george.log")
 DEFAULT_FEEDS = [
     ["RTE", "https://www.rte.ie/feeds/rss/?index=/news/"],
     ["BBC", "https://feeds.bbci.co.uk/news/rss.xml"],
+    # Irish Times serves this through Arc, which 403s non-browser agents
+    # often enough to be a nuisance. Kept because it works when it works,
+    # and the failure is now reported by name rather than silently
+    # dropping the story count.
     ["Irish Times", "https://www.irishtimes.com/arc/outboundfeeds/feed-irish-news/"],
-    ["Reuters World", "https://www.reutersagency.com/feed/?best-topics=world"],
+    # Reuters killed its public RSS -- reutersagency.com/feed 404s. The
+    # Guardian and AP both still publish, and both answer a plain
+    # urllib request without a browser User-Agent, which several outlets
+    # now refuse.
+    ["Guardian World", "https://www.theguardian.com/world/rss"],
+    ["AP News", "https://feedx.net/rss/ap.xml"],
     ["Ars Technica", "https://feeds.arstechnica.com/arstechnica/index"],
     ["Hacker News", "https://hnrss.org/frontpage"],
     ["The Register", "https://www.theregister.com/headlines.atom"],
@@ -89,6 +98,9 @@ DEFAULTS: Dict[str, Any] = {
     # Schema so invalid output is unrepresentable, not merely discouraged.
     # auto = use it and fall back if the server is too old.
     "structured": "auto",            # auto | off
+    # After a tool-backed answer, check it against the observations and
+    # repair it once. Costs one cheap extra call on those turns only.
+    "verify": "on",                  # on | off
     "thinking": "off",               # auto | off | on  (see chat_stream)
 
     "voice_enabled": True,
@@ -167,6 +179,7 @@ LIMITS: Dict[str, Tuple[float, float]] = {
 CHOICES: Dict[str, Tuple[str, ...]] = {
     "thinking": ("auto", "off", "on"),
     "structured": ("auto", "off"),
+    "verify": ("on", "off"),
     "voice_engine": ("auto", "piper", "espeak", "sapi", "none"),
     "persona": ("jarvis", "plain", "blunt"),
     "watch_mode": ("advice", "banter", "quiet"),

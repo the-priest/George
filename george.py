@@ -1269,6 +1269,58 @@ class GeorgeWindow(Adw.ApplicationWindow):
         save_config(self.cfg)
         self._set_state("idle" if self._engine_ok else "down")
 
+    def _test_feeds(self, view: Any, row: Any, btn: Any) -> None:
+        """Fetch every feed in the editor and report which ones answer.
+
+        Feeds rot. Reuters killed its RSS and George reported "1
+        headlines" for weeks before anyone worked out why. Rather than
+        trust a list I cannot reach from where this was written, give
+        him the button.
+        """
+        buf = view.get_buffer()
+        text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+        feeds = []
+        for line in text.splitlines():
+            if "|" in line:
+                name, _, url = line.partition("|")
+                if name.strip() and url.strip():
+                    feeds.append([name.strip(), url.strip()])
+        if not feeds:
+            row.set_subtitle("no feeds to test")
+            return
+        btn.set_sensitive(False)
+        btn.set_label("testing...")
+        row.set_subtitle("checking %d feeds..." % len(feeds))
+
+        def work() -> None:
+            good, bad = [], []
+            for name, url in feeds:
+                try:
+                    items = fetch_news_detailed([[name, url]], per_feed=3)[0]
+                except Exception as exc:
+                    bad.append("%s (%s)" % (name, str(exc)[:50]))
+                    continue
+                if items:
+                    good.append("%s (%d)" % (name, len(items)))
+                else:
+                    bad.append("%s (no items)" % name)
+
+            def done() -> None:
+                btn.set_sensitive(True)
+                btn.set_label("Test")
+                if not bad:
+                    row.set_subtitle("all %d feeds answered" % len(good))
+                else:
+                    row.set_subtitle(
+                        "%d ok, %d failed: %s"
+                        % (len(good), len(bad), "; ".join(bad)[:180]))
+                row.set_tooltip_text("OK: %s\n\nFAILED: %s"
+                                     % (", ".join(good) or "none",
+                                        "; ".join(bad) or "none"))
+            idle(done)
+        threading.Thread(target=work, daemon=True,
+                         name="george-feedtest").start()
+
     def _pull_model(self, name: str, row: Any = None,
                     btn: Any = None) -> None:
         """Pull from the Eyes page without making him find the Models
@@ -2068,6 +2120,12 @@ class GeorgeWindow(Adw.ApplicationWindow):
         grp.add(combo_for("ui_density", ["comfortable", "compact"], "Density"))
         row(grp, "Animate the HUD", "off saves a little power",
             switch_for("animations"))
+        # combo_for RETURNS a row -- it is added, not passed to row() as
+        # a suffix widget.
+        _v = combo_for("verify", ["on", "off"], "Check answers")
+        _v.set_subtitle("after a tool-backed answer, one cheap extra call "
+                        "checks it against what the tools returned")
+        grp.add(_v)
         row(grp, "Fast routing",
             "run the obviously-implied tool before asking the model - "
             "one round trip instead of two on common questions",
@@ -2104,6 +2162,21 @@ class GeorgeWindow(Adw.ApplicationWindow):
         holder.add_css_class("composer")
         grp.add(holder)
         row(grp, "Headlines shown", "", spin_for("news_count", 3, 40, 1))
+
+        # A dead feed used to look like a quiet news day. It is reported
+        # by name now, but he should not need a bug report to find out --
+        # this checks every feed in the box above and says which ones
+        # answer.
+        test_row = Adw.ActionRow(title="Test these feeds")
+        test_row.set_subtitle("Checks each one and reports what answers")
+        test_btn = Gtk.Button(label="Test")
+        test_btn.add_css_class("chip")
+        test_btn.set_valign(Gtk.Align.CENTER)
+        test_btn.connect(
+            "clicked",
+            lambda _w: self._test_feeds(feeds_view, test_row, test_btn))
+        test_row.add_suffix(test_btn)
+        grp.add(test_row)
         page.add(grp)
         win.add(page)
 

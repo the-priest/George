@@ -1,5 +1,180 @@
 # George changelog
 
+## 3.9.0 - roadmap 1.3: whole sessions, replayed
+
+Every other test checks a part. This one plays complete turns - what he
+typed, what the model said back, what the tools returned - and asserts
+WHAT REACHED THE SCREEN. That is the only thing he actually experiences,
+and it is the layer where all five of his screenshot bug reports lived
+while the rest of the suite stayed green.
+
+- **Nine scenarios, every one drawn from something that really
+  happened**: the greeting that cost one call, the scratchpad leak, dead
+  feeds reported rather than papered over, the false "news is on his
+  screen" being caught and repaired, a slow box getting the
+  pre-analysed verdict, George NOT claiming it cannot write code, a
+  declined confirmation not being retried forever, a failed `show` not
+  becoming a success story, and a canned "Done." repaired into an
+  actual answer.
+- **Universal contracts checked on every scenario**, whatever the model
+  did: he is never shown nothing, scratchpad never reaches the screen,
+  raw protocol JSON never reaches the screen, a raw OBSERVATION never
+  reaches the screen, the reply is never a wall of text, and what is
+  SPOKEN matches what is SHOWN.
+- The router is ON by default in these, because that is the real path -
+  for "whats the news" and "why is my box so slow" the tool is
+  prefetched and the model never chooses it. Scenarios testing the
+  model's own tool choice set `"router": False` explicitly.
+- **Verified by breaking three safety layers in turn** - the reply
+  firewall, the verification pass, and the canned-answer repair. Each
+  break was caught, and named in plain English rather than as an
+  assertion number.
+
+**Standing rule:** when something breaks, add the session here BEFORE
+fixing it. A scenario is cheap; a repeat of the same bug is not.
+
+## 3.8.0 - roadmap 2.2: labelled fields, not prose to re-parse
+
+A tool that returns a sentence makes the model dig the numbers back out
+of it before it can use them, and every re-derivation is a chance to
+garble one.
+
+- **`tool_system` was the worst offender.** It returned "memory: 0.3 /
+  3.9 GiB (7%)" and DELIBERATELY DROPPED `cpu_pct`, `mem_pct` and
+  `disk_pct` - the three clean numbers it already had - so the model had
+  to parse a percentage back out of a string. It now returns
+  `cpu_percent: 0`, `memory_percent: 7`, `disk_percent: 96` as bare
+  numbers on their own lines, plus everything else it knows, plus a
+  SUMMARY verdict worked out in Python ("under load - disk at 96%"), and
+  an instruction not to recompute anything.
+- New `fields_block()` renders labelled values, then a human line, then
+  the instruction. Empty, None and "?" values are DROPPED rather than
+  printed - a small model will read "battery: None" straight back to him
+  as a fact.
+- `tool_weather` restructured the same way, and its dead prose return -
+  unreachable since the fields version went in above it - removed.
+- This also makes 2.1 sharper: the verification pass now compares a
+  claim against `disk_percent: 96` instead of against a paragraph.
+
+**BUG MY OWN NEW TEST CAUGHT:** `w.get("desc", "conditions unclear")`
+returns None when the key EXISTS with value None - the default only
+covers a MISSING key. A partial upstream response rendered "None in
+None, NoneC" and the model would have read it back as fact. Same family
+as the falsy-zero bug that has now bitten four times. Fixed here and in
+the two siblings the sweep found (search result titles, the diagnose
+vitals line).
+
+## 3.7.0 - roadmap 2.1: George checks his own answers
+
+A 4B is poor at being right first time and noticeably BETTER at judging
+whether a specific sentence is supported by text sitting in front of it.
+That asymmetry is the biggest lever in this project, and it attacks the
+failure he has hit most: George stating things that are not so.
+
+- **After a tool-backed answer, one cheap constrained call** asks
+  whether every factual claim is supported by the observations, with a
+  two-field verdict schema. If not, one repair using only what the
+  evidence shows - and if the evidence does not answer him, it says so
+  rather than filling the gap.
+- The canonical case is his own screenshot: the news tool returned zero
+  headlines because Reuters 404'd, and George said "News articles are
+  now on his screen." The evidence said the opposite in plain text.
+  `tests/test_verify.py` runs exactly that turn and asserts the repair.
+- **Deliberate limits.** Only when a tool actually ran - with no
+  observations there is nothing to check against, and asking a small
+  model to audit its own opinion just produces a second opinion. One
+  repair, never a loop. And it FAILS OPEN: an unparseable verdict, a
+  crashing checker or an empty repair all ship the original answer. A
+  verification layer that can eat replies is worse than none. All four
+  of those are tested.
+- **The honest cost:** one extra call on tool-backed turns only, with a
+  tiny constrained output. Chat and greetings are untouched. Settings >
+  Interface > Check answers turns it off.
+- Two tests failed on this and were RIGHT to - they were counting model
+  calls from before verification existed. They measure routing and loop
+  cost, so they now pin `verify: off` to isolate what they are actually
+  measuring, rather than having their numbers quietly absorb another
+  feature's cost.
+- Verified by breaking it two ways: removing the call, and forcing the
+  verdict to always say "supported". Both caught.
+
+## 3.6.0 - roadmap 1.1 and 1.2
+
+**1.1 - dead feeds.** Reuters killed its public RSS; his own screenshot
+caught the 404. Replaced with Guardian World and AP, both of which
+answer a plain urllib request without a browser User-Agent - which
+several outlets now refuse. Irish Times kept with a note: its Arc
+endpoint 403s often enough to be a nuisance, but the failure is
+reported by name now rather than silently shrinking the story count.
+
+**New: a "Test these feeds" button** in Settings > News feeds. It
+fetches every feed in the editor and reports which answer and which do
+not, with the reasons on hover. Feeds rot, I cannot reach them from
+where this was written, and he should not need to file a bug to find
+out which one died.
+
+**1.2 - the tool-test gap, the biggest item in the audit.** 27 of 42
+tool functions were never named in any test. The loop around them was
+well covered; the tools themselves were not - and every bug he reported
+by screenshot lived in a tool and passed the entire suite.
+
+New `tests/test_tools_surface.py` calls EVERY registered tool with valid
+args, no args, nulls, wrong types, unexpected keys and a 5000-character
+string - 33 tools x 6 arg shapes - and asserts the contract the loop
+depends on: always returns a string, never raises, never claims an
+effect it did not have, never performs a side effect without asking, and
+reports a refusal clearly enough that the model stops retrying.
+
+It also AST-walks george_tools for every `ag.<attr>` the tools touch and
+fails if the stand-in agent is missing one - otherwise the file silently
+stops covering a tool the day it starts using a new callback. That check
+found two of my own stubs with the wrong signature immediately
+(`take_screenshot` returns (ok, path), not a path).
+
+Verified by reintroducing three real past bugs: it caught the news
+screen-claim and the missing confirmation on `code`.
+
+**One real fix it surfaced:** `tool_weather` indexed its result dict
+directly (`w["feels_c"]`) - a dict built in another module from a
+third-party JSON shape. It fills every key today; a KeyError the day it
+did not would have been swallowed by the loop's guard and looked like
+the weather tool simply doing nothing. Now `.get` with defaults.
+
+## 3.5.0 - it can write and run code, and now it knows that
+
+He asked for a Python program that prints an ASCII bee. George replied
+"I can't print ASCII art or run code directly" and pasted two print
+statements - while holding `write_file` and `run`, which together do
+exactly what he asked. He can do it in a terminal in ten seconds; being
+told it is impossible is worse than being refused.
+
+- **New `code` tool: write a script AND run it, in one call.** The tools
+  were always there. Nothing told the model they COMPOSE, and a 4B will
+  not work that out under pressure - so the composition is a tool of its
+  own. python, bash, sh and node. The script is saved under
+  `~/.local/share/george/scripts` and kept, and the real stdout, stderr
+  and exit code come back.
+- **One confirmation, showing the actual source.** That is the honest
+  unit of consent: he is approving one intention, not two mechanical
+  steps. Asking twice for one intention just trains him to click
+  through without reading. Declining says so, tells the model not to
+  retry, and tells it to show him the source in the answer so his
+  request is not simply lost.
+- **New rule R2, stated positively AND negatively**: you CAN write files
+  and run programs; never claim you cannot run code, print ASCII art or
+  produce a file - saying so is false and he knows it is false. If a
+  tool refuses or he declines, that is a different thing, and you say
+  THAT instead.
+- Failures are honest: a crash reports the exit code and the traceback,
+  a 60-second overrun says it was stopped and where the script is, a
+  missing interpreter says so, and a script that printed nothing says it
+  printed nothing rather than leaving the model to invent output.
+- 33 tools. Prompt ~3127 tokens, still under the 3200 ceiling.
+- **New `tests/test_code_tool.py`** - real execution and real output,
+  exactly one confirmation, the source shown in it, declining handled
+  without losing his work, crashes and empty output reported honestly,
+  and the prompt actually containing the capability claim.
+
 ## 3.4.0 - constrained decoding: misbehaviour becomes unrepresentable
 
 Everything so far has tried to PERSUADE a 4B model to emit the protocol

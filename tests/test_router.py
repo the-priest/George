@@ -239,7 +239,12 @@ class CountingOllama:
 
 gt.TOOLS["system"] = lambda args, ag: "cpu 12%, ram 4.1/15.0 GiB, up 2d"
 
+# verify=off here ON PURPOSE: this block measures what ROUTING costs.
+# The verification pass adds one cheap constrained call on any
+# tool-backed answer, which is a real cost but a different one, and it
+# has its own file.
 cfg = dict(gc.DEFAULTS)
+cfg["verify"] = "off"
 ag = gt.Agent(cfg, gt.MemoryStore(), DummyTTS())
 ag.ollama = CountingOllama(
     ['{"tool":"answer","args":{"text":"The box is fine - 12% CPU."}}'])
@@ -260,6 +265,7 @@ check(any(c.startswith("GUIDANCE:") for c in seen),
 
 # ...and with the router off, the same question costs two calls
 cfg2 = dict(gc.DEFAULTS)
+cfg2["verify"] = "off"
 cfg2["router"] = False
 ag2 = gt.Agent(cfg2, gt.MemoryStore(), DummyTTS())
 ag2.ollama = CountingOllama([

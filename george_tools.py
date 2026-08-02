@@ -15,13 +15,17 @@ import ast
 import json
 import os
 import re
+import shutil
+import subprocess
+import sys
 import threading
 import time
 import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from george_core import (
-    APP_NAME, DEFAULT_FEEDS, HOME, POWER_ACTIONS, MemoryStore, NOTES_PATH,
+    APP_NAME, DATA_DIR, DEFAULT_FEEDS, HOME, POWER_ACTIONS, MemoryStore,
+    NOTES_PATH,
     machine_summary,
     Ollama, OllamaError, _ensure_dirs, clipboard_read, clipboard_write,
     detect_pkg_mgr, disk_report, fetch_news_detailed, find_files,
@@ -33,6 +37,7 @@ from george_core import (
     take_screenshot, volume_control, weather, web_search, write_text_file,
 )
 import george_intent as intent
+import george_platform as osx
 from george_voice import TextToSpeech
 
 
@@ -96,6 +101,20 @@ media        {"action": str}                play|pause|next|previous|
 volume       {"action": "up"|"down"|"mute"|"get", "level": int}
 power        {"action": "lock"|"suspend"|"logout"|"reboot"|"shutdown"}
                                             always confirmed, no exceptions
+
+--- WRITING AND RUNNING CODE ---
+code         {"language": "python"|"bash"|"sh"|"node",
+              "source": str, "argv": [str]}
+                                            WRITE a program and RUN it, in one
+                                            call. You CAN do this. Use it for
+                                            "write me a script that...",
+                                            ASCII art, one-off calculations,
+                                            file processing, anything easier to
+                                            compute than to reason about. He
+                                            sees the source and confirms once,
+                                            the script is kept, and you get the
+                                            real stdout back. Never say you
+                                            cannot run code.
 
 --- FILES ---
 read_file    {"path": str}                  read a text file
@@ -236,28 +255,34 @@ is will be obvious to him, because he is looking at the screen. If a tool \
 failed or returned less than you expected, say that instead. Being wrong \
 about what you just did is worse than doing nothing.
 
-R2. Never invent tool output, a URL, a filename, a version or a number. If \
+R2. You CAN write files and run programs. If he asks for a script, use
+`code` - write it AND run it, then show him the real output. Never claim you
+cannot run code, print ASCII art, or produce a file: saying so is false and he
+knows it is false, because he can do it himself in a terminal. If a tool
+refuses or he declines, that is a different thing, and you say THAT instead.
+
+R3. Never invent tool output, a URL, a filename, a version or a number. If \
 you did not see it in an OBSERVATION or in CONTEXT below, you do not know \
 it. Say so.
 
-R3. Do not guess at anything current - the date, the news, the weather, \
+R4. Do not guess at anything current - the date, the news, the weather, \
 prices, what is on his disk. Look it up, then answer from what came back.
 
-R4. `answer` is your reply in your own words, not a status report. Never \
+R5. `answer` is your reply in your own words, not a status report. Never \
 answer with "Done.", "OK." or "Already on screen." Say what you found or \
 what you did.
 
-R5. One shell command at a time, never chained. Read-only commands run \
+R6. One shell command at a time, never chained. Read-only commands run \
 immediately without bothering him. Anything that CHANGES the machine, \
 touches his files, or affects his session or power state asks him first - \
 and a declined action is a no, not a retry. Never batch a change into a read.
 
-R6. You already know what machine this is; it is in CONTEXT below. Do not \
+R7. You already know what machine this is; it is in CONTEXT below. Do not \
 ask him. Write commands in the right dialect for it.
 
-R7. Keep reasoning short. He wants the result, not the working.
+R8. Keep reasoning short. He wants the result, not the working.
 
-R8. Your answers are READ ON SCREEN AND SPOKEN ALOUD. Write to be heard: \
+R9. Your answers are READ ON SCREEN AND SPOKEN ALOUD. Write to be heard: \
 short sentences, no ASCII tables, no emoji, no walls of text. Markdown for \
 emphasis, lists and code is fine and renders properly.
 
@@ -288,7 +313,10 @@ def _fmt_results(results: List[Dict[str, str]]) -> str:
         return "no results"
     out = []
     for i, r in enumerate(results, 1):
-        line = "%d. %s\n   %s" % (i, r.get("title", "?"), r.get("url", ""))
+        # `or`, not a .get default: a result with an explicit None title
+        # would otherwise print "None" and be read back to him as one.
+        line = "%d. %s\n   %s" % (i, r.get("title") or "(no title)",
+                                  r.get("url") or "")
         if r.get("snippet"):
             line += "\n   %s" % r["snippet"][:280]
         out.append(line)
@@ -389,18 +417,57 @@ def tool_weather(args: Dict[str, Any], ag: "Agent") -> str:
     if w.get("error"):
         return w["error"]
     ag.show_weather(w)
-    return ("%s: %s, %sC (feels %sC), wind %s km/h, humidity %s%%, "
-            "today %s to %sC" % (w["place"], w["desc"], w["temp_c"],
-                                 w["feels_c"], w["wind_kph"], w["humidity"],
-                                 w["min_c"], w["max_c"]))
+    return fields_block(
+        [("place", w.get("place")), ("conditions", w.get("desc")),
+         ("temp_c", w.get("temp_c")), ("feels_like_c", w.get("feels_c")),
+         ("wind_kph", w.get("wind_kph")), ("humidity_pct", w.get("humidity")),
+         ("today_min_c", w.get("min_c")), ("today_max_c", w.get("max_c"))],
+        # `.get(k, default)` returns None when the key EXISTS with value
+        # None -- the default only covers a MISSING key. A partial
+        # upstream response then renders "None in None, NoneC" and the
+        # model reads it back to him as fact. Same family as the
+        # falsy-zero bug: never trust .get's default to mean "usable".
+        "%s in %s, %sC" % (w.get("desc") or "conditions unclear",
+                           w.get("place") or "here",
+                           w.get("temp_c") if w.get("temp_c") is not None
+                           else "?"),
+        "Answer in a sentence or two. Say whether he needs a coat.")
 
 
 def tool_system(args: Dict[str, Any], ag: "Agent") -> str:
     ag.step("reading system vitals")
     st = system_status()
     ag.show_vitals(st)
-    return "\n".join("%s: %s" % (k, v) for k, v in st.items()
-                     if not k.endswith("_pct"))
+
+    def pct(key):
+        try:
+            return int(float(str(st.get(key, "")).rstrip("%")))
+        except (TypeError, ValueError):
+            return None
+
+    cpu, mem, disk = pct("cpu_pct"), pct("mem_pct"), pct("disk_pct")
+    hot = []
+    if cpu is not None and cpu >= 85:
+        hot.append("CPU at %d%%" % cpu)
+    if mem is not None and mem >= 90:
+        hot.append("memory at %d%%" % mem)
+    if disk is not None and disk >= 90:
+        hot.append("disk at %d%%" % disk)
+    summary = ("under load - %s" % ", ".join(hot)) if hot else \
+        "nothing is out of range"
+
+    return fields_block(
+        [("cpu_percent", cpu), ("memory_percent", mem),
+         ("disk_percent", disk), ("memory", st.get("memory")),
+         ("disk_free", st.get("disk")), ("load_average", st.get("load")),
+         ("uptime", st.get("uptime")), ("host", st.get("host")),
+         ("distro", st.get("distro")), ("kernel", st.get("kernel")),
+         ("arch", st.get("arch")), ("cpu_model", st.get("cpu_model")),
+         ("cores", st.get("cores")), ("battery", st.get("battery")),
+         ("desktop", st.get("desktop")), ("session", st.get("session"))],
+        summary,
+        "Quote these numbers as they are. Do not recompute a percentage "
+        "or convert a unit yourself.")
 
 
 def tool_run(args: Dict[str, Any], ag: "Agent") -> str:
@@ -427,6 +494,104 @@ def tool_run(args: Dict[str, Any], ag: "Agent") -> str:
     if len(out) > 4000:
         out = out[:4000] + "\n[...truncated]"
     return "exit=%d\n%s" % (rc, out)
+
+
+
+def tool_code(args: Dict[str, Any], ag: "Agent") -> str:
+    """Write a script and run it, in ONE call.
+
+    He asked George to write a Python program that prints an ASCII bee,
+    and George said "I can't print ASCII art or run code directly" -
+    while holding `write_file` and `run`, which together do exactly
+    that. The tools were there; nothing told the model they COMPOSE, and
+    a 4B will not work that out under pressure. So the composition
+    becomes a tool of its own.
+
+    One confirmation, showing the actual source, covers both the write
+    and the execution -- that is the honest unit of consent here. Asking
+    twice for one intention just trains him to click through.
+    """
+    lang = str(args.get("language", args.get("lang", "python"))).lower()
+    source = str(args.get("source", args.get("code", args.get("text", ""))))
+    if not source.strip():
+        return "no source given - put the program in `source`"
+
+    runners = {
+        "python": ("py", [sys.executable or "python3"]),
+        "python3": ("py", [sys.executable or "python3"]),
+        "py": ("py", [sys.executable or "python3"]),
+        "bash": ("sh", ["bash"]),
+        "sh": ("sh", ["sh"]),
+        "shell": ("sh", ["bash"]),
+        "node": ("js", ["node"]),
+        "javascript": ("js", ["node"]),
+    }
+    if lang not in runners:
+        return ("cannot run %r. Supported: python, bash, sh, node."
+                % lang)
+    ext, argv0 = runners[lang]
+
+    if argv0[0] != sys.executable and shutil.which(argv0[0]) is None:
+        return ("%s is not installed on this machine, so that script "
+                "cannot run here. Say so." % argv0[0])
+
+    keep = os.path.join(DATA_DIR, "scripts")
+    try:
+        os.makedirs(keep, exist_ok=True)
+    except OSError as exc:
+        return "could not create the scripts folder: %s" % exc
+    name = "george_%s.%s" % (time.strftime("%Y%m%d_%H%M%S"), ext)
+    path = os.path.join(keep, name)
+
+    preview = source if len(source) <= 1200 else source[:1200] + "\n[...]"
+    ag.step("waiting for his OK to run a %s script" % lang)
+    if not ag.confirm("Run this %s script?" % lang,
+                      "%s\n\n---\nSaved to %s" % (preview, path)):
+        ag.tool_card("code", lang, "declined")
+        return ("He declined to run it. Do not retry. Show him the source "
+                "in your answer instead so he can run it himself.")
+
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(source)
+        if ext == "sh":
+            os.chmod(path, 0o700)
+    except OSError as exc:
+        ag.tool_card("code", lang, "write failed")
+        return "could not write the script: %s" % exc
+
+    ag.step("running the %s script" % lang)
+    extra = [str(a) for a in (args.get("argv") or []) if str(a).strip()]
+    try:
+        proc = subprocess.run(argv0 + [path] + extra,
+                              capture_output=True, timeout=60,
+                              **osx.spawn_kwargs())
+        rc = proc.returncode
+        out = (proc.stdout or b"").decode("utf-8", "replace")
+        err = (proc.stderr or b"").decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        ag.tool_card("code", lang, "timed out")
+        return ("The script was still running after 60 seconds and was "
+                "stopped. It is saved at %s." % path)
+    except Exception as exc:
+        ag.tool_card("code", lang, "failed")
+        return "could not run the script: %s" % exc
+
+    ag.tool_card("code", lang, "exit %d" % rc)
+    blocks = ["Saved to %s and ran it. Exit code %d." % (path, rc)]
+    if out.strip():
+        blocks.append("STDOUT:\n" + (out[:4000] + "\n[...truncated]"
+                                     if len(out) > 4000 else out))
+    if err.strip():
+        blocks.append("STDERR:\n" + (err[:2000] + "\n[...truncated]"
+                                     if len(err) > 2000 else err))
+    if not out.strip() and not err.strip():
+        blocks.append("It produced no output.")
+    blocks.append("Show him the OUTPUT above, exactly as it came out - "
+                  "do not retype or 'tidy' it, and do not claim output "
+                  "it did not produce. If the exit code is not 0, say "
+                  "what went wrong.")
+    return "\n\n".join(blocks)
 
 
 def tool_launch(args: Dict[str, Any], ag: "Agent") -> str:
@@ -687,6 +852,47 @@ def tool_open_path(args: Dict[str, Any], ag: "Agent") -> str:
 
 
 # =====================================================================
+# STRUCTURED RESULTS
+#
+# A tool that returns prose makes the model re-derive numbers out of a
+# sentence before it can use them, and every re-derivation is a chance
+# to garble one. tool_system was the worst offender: it returned
+# "memory: 0.3 / 3.9 GiB (7%)" and deliberately DROPPED cpu_pct,
+# mem_pct and disk_pct -- the three clean numbers it already had.
+#
+# Tools now return labelled fields first and a human line after. The
+# model quotes a field instead of recomputing it, and the verification
+# pass in _verify_final can compare a claim against a labelled value
+# rather than against a paragraph.
+# =====================================================================
+
+def fields_block(fields: List[Tuple[str, Any]], summary: str = "",
+                 note: str = "") -> str:
+    """Labelled values, then a human line, then any instruction.
+
+    Empty and None values are dropped rather than rendered as "None",
+    which a small model will happily read back to him as a fact.
+    """
+    lines = []
+    for key, value in fields:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text or text in ("?", "unknown"):
+            continue
+        lines.append("  %s: %s" % (key, text))
+    out = []
+    if lines:
+        out.append("FIELDS\n" + "\n".join(lines))
+    if summary:
+        out.append("SUMMARY: " + summary)
+    if note:
+        out.append(note)
+    return "\n\n".join(out) if out else "(nothing to report)"
+
+
+
+# =====================================================================
 # THE PROTOCOL SCHEMA
 #
 # ollama accepts a JSON Schema in `format` and masks the sampler so that
@@ -716,6 +922,18 @@ def tool_schema() -> Dict[str, Any]:
         },
         "required": ["tool", "args"],
     }
+
+
+# The schema for the check below. Tiny on purpose: the whole point is
+# that this costs a fraction of a normal turn.
+VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "supported": {"type": "boolean"},
+        "problem": {"type": "string"},
+    },
+    "required": ["supported"],
+}
 
 
 # =====================================================================
@@ -940,8 +1158,9 @@ def tool_diagnose(args: Dict[str, Any], ag: "Agent") -> str:
         verdicts.append("the disk is %.0f%% full" % disk)
     swap = str(st.get("swap", ""))
     parts.append("VITALS: cpu %s%%, memory %s, disk %s, swap %s, up %s"
-                 % (st.get("cpu_pct", "?"), st.get("memory", "?"),
-                    st.get("disk", "?"), swap or "?", st.get("uptime", "?")))
+                 % (st.get("cpu_pct") or "?", st.get("memory") or "?",
+                    st.get("disk") or "?", swap or "?",
+                    st.get("uptime") or "?"))
     try:
         parts.append("DISKS:\n" + disk_report())
     except Exception as exc:
@@ -1001,6 +1220,7 @@ def tool_research(args: Dict[str, Any], ag: "Agent") -> str:
 
 
 TOOLS: Dict[str, Callable[[Dict[str, Any], "Agent"], str]] = {
+    "code": tool_code,
     "pkg": tool_pkg,
     "diagnose": tool_diagnose,
     "research": tool_research,
@@ -1544,6 +1764,9 @@ class Agent:
                     final_text = self._repair_final(
                         final_text, observations, recent_observations,
                         model, ran_tool_this_turn)
+                    final_text = self._verify_final(
+                        final_text, observations, recent_observations,
+                        model, ran_tool_this_turn)
                     self.on_final(final_text)
                     self.tts.speak(final_text)
                     break
@@ -1623,6 +1846,116 @@ class Agent:
         except Exception as exc:
             log("agent: json-only retry failed: %s" % exc)
         return ""
+
+    # ---- verification -------------------------------------------------
+    def _verify_final(self, final_text: str, observations: List[str],
+                      recent_observations: List[str], model: str,
+                      ran_tool: bool) -> str:
+        """Check the answer against the evidence, and repair it once.
+
+        A 4B is poor at being right first time and noticeably BETTER at
+        judging whether a specific sentence is supported by text sitting
+        in front of it. That asymmetry is the biggest lever available
+        here, and it attacks the failure he has hit most: George stating
+        things that are not so -- news on a screen it never opened,
+        headlines it never retrieved, a script it claimed it could not
+        run.
+
+        Deliberate limits:
+          * Only when a tool actually ran. With no observations there is
+            no evidence to check against, and asking a small model to
+            audit its own opinion just produces a second opinion.
+          * One repair, never a loop. A model that failed twice will not
+            succeed on the third try, and he is waiting.
+          * FAILS OPEN. If the check errors, times out, or comes back
+            unparseable, the original answer ships. A verification layer
+            that can eat replies is worse than none.
+        """
+        text = str(final_text or "").strip()
+        if not ran_tool or not text:
+            return text
+        if str(self.cfg.get("verify", "on")).lower() == "off":
+            return text
+        evidence = [o for o in (observations or recent_observations) if o]
+        if not evidence:
+            return text
+
+        joined = "\n\n".join(evidence)
+        if len(joined) > 6000:
+            joined = joined[-6000:]
+
+        try:
+            verdict = self.ollama.chat_stream(
+                [{"role": "system",
+                  "content": ("You are checking one answer against the "
+                              "evidence it was drawn from. Reply with JSON "
+                              "only.")},
+                 {"role": "user",
+                  "content": (
+                      "EVIDENCE:\n%s\n\nANSWER GIVEN TO THE USER:\n%s\n\n"
+                      "Is every factual claim in the answer supported by "
+                      "the evidence above? Claims about what was OPENED, "
+                      "SHOWN, RUN or INSTALLED count as factual. General "
+                      "advice and pleasantries do not need support. If "
+                      "something is unsupported, put it in `problem`."
+                      % (joined, text))}],
+                lambda _t: None, self.stop_event, model=model,
+                schema=VERDICT_SCHEMA)
+        except Exception as exc:
+            log("verify: check failed, shipping as-is (%s)" % exc)
+            return text
+
+        obj = None
+        try:
+            raw = strip_reasoning(verdict or "").strip()
+            # Constrained decoding gives us a bare object; parse loosely
+            # anyway, because `structured: off` is a supported setting.
+            start, end = raw.find("{"), raw.rfind("}")
+            if start >= 0 and end > start:
+                cand = json.loads(raw[start:end + 1])
+                if isinstance(cand, dict) and "supported" in cand:
+                    obj = cand
+        except Exception:
+            obj = None
+        if obj is None:
+            log("verify: unparseable verdict, shipping as-is")
+            return text
+        if obj.get("supported"):
+            return text
+
+        problem = str(obj.get("problem", "")).strip()[:400]
+        log("verify: unsupported claim -- %s" % (problem or "(unspecified)"))
+        self.step("checking that against what came back")
+
+        try:
+            fixed = self.ollama.chat_stream(
+                [{"role": "system", "content": self.system_message()},
+                 {"role": "user",
+                  "content": (
+                      "EVIDENCE:\n%s\n\nYou told him:\n%s\n\nThat is not "
+                      "supported by the evidence: %s\n\nSay it again, using "
+                      "only what the evidence actually shows. If the "
+                      "evidence does not answer him, say THAT plainly "
+                      "instead of filling the gap. Reply with the "
+                      "`answer` action only."
+                      % (joined, text, problem or "see above"))}],
+                lambda _t: None, self.stop_event, model=model,
+                schema=self._schema)
+        except Exception as exc:
+            log("verify: repair failed, shipping the original (%s)" % exc)
+            return text
+
+        fixed = strip_reasoning(fixed or "")
+        for name, args in extract_actions(fixed):
+            if name == "answer":
+                out = str(args.get("text", "")).strip()
+                if out and not looks_like_scratchpad(out):
+                    log("verify: repaired the answer")
+                    return out
+        plain = strip_action_json(fixed).strip()
+        if plain and not looks_like_scratchpad(plain) and len(plain) < 1500:
+            return plain
+        return text
 
     def _repair_final(self, final_text: str, observations: List[str],
                       recent_observations: List[str], model: str,

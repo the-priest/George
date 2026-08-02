@@ -56,6 +56,21 @@ python3 tests/test_firewall.py || fail=1
 echo "== constrained decoding =="
 python3 tests/test_structured.py || fail=1
 
+echo "== write-and-run code =="
+python3 tests/test_code_tool.py || fail=1
+
+echo "== every tool, every arg shape =="
+python3 tests/test_tools_surface.py || fail=1
+
+echo "== verification pass =="
+python3 tests/test_verify.py || fail=1
+
+echo "== structured tool results =="
+python3 tests/test_structured_results.py || fail=1
+
+echo "== whole sessions, replayed =="
+python3 tests/test_sessions.py || fail=1
+
 echo "== design lint (contrast, type scale, sheet) =="
 python3 tests/test_design.py || fail=1
 

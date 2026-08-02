@@ -930,6 +930,9 @@ class Agent:
                             last_obs = source_obs[-1]
                             body = last_obs.split('\n', 1)[1] if '\n' in last_obs else last_obs
                             summary = body.strip().split('\n')[0][:400]
+                            # redact obvious filesystem paths and collapse whitespace
+                            summary = re.sub(r'([A-Za-z]:\\\\[^\s]+|/[^\s]+)', '[REDACTED_PATH]', summary)
+                            summary = re.sub(r'\s+', ' ', summary).strip()
                             log("agent: replacing short final '%s' with observation summary" % final_text[:40])
                             final_text = summary
                     self.on_final(final_text)

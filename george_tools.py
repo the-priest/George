@@ -849,6 +849,7 @@ class Agent:
                 self.on_step("still thinking - %ds with no output"
                              % int(waited))
 
+            recent_observations: List[str] = []
             for step_no in range(int(self.cfg.get("max_steps", 14))):
                 if self.stop_event.is_set():
                     self.on_step("stopped")
@@ -892,10 +893,11 @@ class Agent:
                     sig = tool + json.dumps(args, sort_keys=True)[:200]
                     log("agent: tool call candidate %s args=%s" % (tool, json.dumps(args, sort_keys=True)))
                     if last_calls.count(sig) >= 2:
-                        observations.append(
-                            "%s: you already ran this twice with the same "
-                            "arguments and got the same thing. Use what you "
-                            "have and answer him." % tool)
+                        # Avoid telling the user in the transcript that the
+                        # model duplicated itself; add a terse observation
+                        # instead so the assistant can proceed without
+                        # producing a canned confirmation phrase.
+                        observations.append("OBSERVATION (%s): (duplicate call ignored)" % tool)
                         log("agent: dedupe skipped tool %s" % tool)
                         continue
                     last_calls.append(sig)
@@ -909,11 +911,31 @@ class Agent:
                     log("agent: tool %s returned %d chars" % (tool, len(result)))
 
                 if final_text is not None:
+                    # If the model's final answer is just a short canned
+                    # confirmation (e.g. "Done."), replace it with a more
+                    # informative summary drawn from the last observation so
+                    # the user hears something meaningful.
+                    if final_text.strip().lower() in ("done", "done.", "ok", "ok.", "already on screen", "already on screen."):
+                        # prefer recent observations from prior steps if present
+                        source_obs = observations or recent_observations
+                        if source_obs:
+                            last_obs = source_obs[-1]
+                            body = last_obs.split('\n', 1)[1] if '\n' in last_obs else last_obs
+                            summary = body.strip().split('\n')[0][:400]
+                            log("agent: replacing short final '%s' with observation summary" % final_text[:40])
+                            final_text = summary
                     self.on_final(final_text)
                     self.tts.speak(final_text)
                     break
 
                 if observations:
+                    # keep a short-lived copy of observations across steps so
+                    # the model's final answer can be made more informative if
+                    # it emits only a short confirmation later.
+                    recent_observations.extend(observations)
+                    # trim to avoid unbounded growth
+                    if len(recent_observations) > 20:
+                        recent_observations = recent_observations[-20:]
                     self.history.append({"role": "user",
                                          "content": "\n\n".join(observations)})
             else:

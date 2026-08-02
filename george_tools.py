@@ -24,7 +24,7 @@ from george_core import (
     APP_NAME, DEFAULT_FEEDS, HOME, POWER_ACTIONS, MemoryStore, NOTES_PATH,
     machine_summary,
     Ollama, OllamaError, _ensure_dirs, clipboard_read, clipboard_write,
-    disk_report, fetch_news, find_files, html_to_text, http_get,
+    disk_report, fetch_news_detailed, find_files, html_to_text, http_get,
     inside_sandbox, is_destructive_command, is_network_pipe_to_shell,
     command_needs_confirmation, launch_app, list_processes, log,
     media_control, network_status, notify, open_in_browser, open_path,
@@ -128,6 +128,14 @@ what a page says, or when he asks you to DO something.
 - `answer` is your reply to him in your own words, not a status report. Never \
 answer with "Done.", "OK." or "Already on screen." - say what you found or \
 what you did, in a sentence he would want to hear.
+- NEVER tell him something is on his screen, open, running, installed or \
+done unless a tool came back and SAID SO. "show" is the only thing that puts \
+a page in front of him, and only when it reports that it opened. Pulling the \
+news fills a card in the sidebar - that is not the same as putting it on his \
+screen, and claiming it is will be obvious to him because he is looking at \
+the screen. If a tool failed or came back with less than you expected, say \
+that instead. Being wrong about what you just did is worse than doing \
+nothing.
 - Do not guess at anything current. The date, news, weather, prices, what is on \
 his disk: look it up with a tool first, then answer from what came back.
 - "show me", "put it on screen", "open it" means the `show` or `open_path` \
@@ -144,8 +152,13 @@ sc query, wmic get, winget list and the Get-* PowerShell cmdlets. Just run \
 them and answer. Anything that CHANGES the machine asks him first, so do not \
 batch changes into a read.
 - One shell command at a time. Never chain a second one onto a reply.
-- On Arch and CachyOS use `pacman -Syu <pkg>`, never a bare `-S`. On Windows \
-prefer `winget install --id <id> -e`.
+- On Arch and CachyOS: `pacman -Syu <pkg>` to install, never a bare `-S` and \
+never `-Sy` on its own - a partial upgrade breaks that system. Query with \
+`pacman -Q`/`-Qi`/`-Ss`/`-Si`, which run without asking. Anything not in the \
+repos is in the AUR and needs `paru -S <pkg>` or `yay -S <pkg>`; do not tell \
+him pacman can install an AUR package, it cannot. CachyOS is Arch underneath, \
+so Arch answers apply, but it ships its own kernel and repos - do not tell him \
+to replace either. On Windows prefer `winget install --id <id> -e`.
 - Anything that touches his files, his session or his power state gets \
 confirmed by him first. A declined action is a no, not a retry.
 - Keep the reasoning short. He wants the result, not the working.
@@ -200,21 +213,51 @@ def tool_news(args: Dict[str, Any], ag: "Agent") -> str:
     topic = str(args.get("topic", "") or "").strip()
     count = int(args.get("count") or ag.cfg.get("news_count") or 12)
     ag.step("pulling headlines%s" % (" about %s" % topic if topic else ""))
-    items = fetch_news(ag.cfg.get("feeds") or DEFAULT_FEEDS,
-                       per_feed=6, topic=topic)
+    items, failures, tried = fetch_news_detailed(
+        ag.cfg.get("feeds") or DEFAULT_FEEDS, per_feed=6, topic=topic)
     items = items[:max(3, min(count, 30))]
     ag.show_news(items)
     ag.tool_card("news", topic or "top stories", "%d headlines" % len(items))
+
+    # NEVER claim anything is "on his screen" here.  This tool fills the
+    # NEWS card in the sidebar -- which may well be scrolled out of view
+    # -- and opens nothing.  The old wording was "Headlines are now on
+    # his screen in the News panel", the model repeated it, and he was
+    # looking at a screen with no news on it.  Only `show` puts a thing
+    # in front of him, and only if it says it succeeded.
+    note = []
+    if failures:
+        note.append("%d of %d feeds failed: %s"
+                    % (len(failures), tried, "; ".join(failures[:4])))
     if not items:
-        return "no headlines matched"
+        note.append("no headlines were retrieved"
+                    + (" for '%s'" % topic if topic else ""))
+        return ("\n".join(note) + "\nTell him plainly that the feeds did not "
+                "come back, and what failed. Do not say anything is on his "
+                "screen.")
+
     lines = []
     for i, it in enumerate(items, 1):
         lines.append("%d. [%s] %s\n   %s" %
                      (i, it["source"], it["title"], it["url"]))
         if it.get("summary"):
             lines.append("   %s" % it["summary"][:200])
-    return ("Headlines are now on his screen in the News panel.\n" +
-            "\n".join(lines))
+
+    head = ("%d headline%s retrieved from %d feed%s, and listed in the NEWS "
+            "card in his sidebar. Nothing has been opened on his screen."
+            % (len(items), "" if len(items) == 1 else "s",
+               tried - len(failures),
+               "" if tried - len(failures) == 1 else "s"))
+    if failures:
+        head += " " + note[0] + "."
+    if len(items) < 3:
+        head += (" That is very few - say so, and name the feeds that "
+                 "failed rather than pretending this is all the news there "
+                 "is.")
+    head += (" Summarise these for him. If he asked you to PUT them ON HIS "
+             "SCREEN, follow up with the `show` tool on one of the URLs "
+             "below and only claim it is open if `show` says it opened.")
+    return head + "\n" + "\n".join(lines)
 
 
 def tool_show(args: Dict[str, Any], ag: "Agent") -> str:

@@ -37,7 +37,7 @@ from gi.repository import Adw, Gdk, GLib, Gio, Gtk, Pango  # noqa: E402
 from george_core import (
     APP_ID, APP_NAME, CONFIG_PATH, CURATED_MODELS, DEFAULT_FEEDS, DEFAULTS,
     NOTES_PATH, VERSION, ChatStore, MemoryStore, ModelManager, Ollama,
-    OllamaSupervisor, clipboard_write, fetch_news, install_hint,
+    OllamaSupervisor, clipboard_write, fetch_news_detailed, install_hint,
     install_crash_handlers, load_config, log, open_in_browser, reasoning_of,
     save_config, system_status, take_screenshot, weather,
 )
@@ -1363,10 +1363,21 @@ class GeorgeWindow(Adw.ApplicationWindow):
         self.weather_body.append(_kv_row("wind", "%s km/h"
                                          % w.get("wind_kph", "?")))
 
-    def render_news(self, items: List[Dict[str, str]]) -> None:
+    def render_news(self, items: List[Dict[str, str]],
+                    failures: Optional[List[str]] = None) -> None:
         _clear(self.news_body)
         if not items:
             self.news_body.append(_label("no headlines", "faint"))
+        if failures:
+            # Show him WHICH feeds are dead. A silent "1 headline" looks
+            # like a quiet news day; it is usually a stale feed URL, and
+            # he can fix that himself in Settings > News feeds.
+            note = _label("%d feed%s failed - check Settings > News feeds"
+                          % (len(failures),
+                             "" if len(failures) == 1 else "s"), "err")
+            note.set_tooltip_text("\n".join(failures))
+            self.news_body.append(note)
+        if not items:
             return
         for it in items[:int(self.cfg.get("news_count", 12))]:
             url = it.get("url", "")
@@ -1490,12 +1501,13 @@ class GeorgeWindow(Adw.ApplicationWindow):
     def _async_news(self, topic: str) -> None:
         def work() -> None:
             try:
-                items = fetch_news(self.cfg.get("feeds") or DEFAULT_FEEDS,
-                                   per_feed=6, topic=topic)
+                items, failures, _tried = fetch_news_detailed(
+                    self.cfg.get("feeds") or DEFAULT_FEEDS,
+                    per_feed=6, topic=topic)
             except Exception as exc:
                 log("news failed: %s" % exc)
-                items = []
-            idle(self.render_news, items)
+                items, failures = [], ["news fetch failed: %s" % exc]
+            idle(self.render_news, items, failures)
         threading.Thread(target=work, daemon=True, name="george-news").start()
 
     def _async_weather(self) -> None:

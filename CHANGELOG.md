@@ -1,5 +1,52 @@
 # George changelog
 
+## 2.6.0 - George stops claiming things he did not do
+
+He asked for the news. George said "News articles are now on his
+screen." Nothing was on his screen. Three things were manufacturing
+that claim.
+
+- **The news tool handed the model the lie.** `tool_news` returned the
+  literal sentence "Headlines are now on his screen in the News panel"
+  regardless of what happened, and the model - correctly - repeated what
+  its tool told it. That tool opens NOTHING. It fills a card in the
+  sidebar, which is frequently scrolled out of view. The observation now
+  states facts only: how many headlines, from how many feeds, that they
+  are in the sidebar NEWS card, and explicitly that nothing has been
+  opened on his screen. If he wanted it in front of him, it tells the
+  model to follow up with `show` and claim nothing until `show` reports
+  success.
+- **Feed failures were invisible.** `fetch_news` swallowed every error
+  into the log, so one headline coming back was indistinguishable from a
+  quiet news day - which is why "1 headlines" arrived with no
+  explanation. New `fetch_news_detailed` returns the failures and the
+  count tried. George now names the dead feeds in his answer, and the
+  sidebar shows "N feeds failed - check Settings > News feeds" with the
+  reasons on hover. The feed list has been editable in Settings all
+  along; now he can see which entries to fix.
+- **`open_in_browser` claimed success without checking.** It returned
+  "opened X on screen" the moment `Popen` did not raise, which only
+  proves the binary exists. It now refuses outright when there is no
+  DISPLAY or WAYLAND_DISPLAY, reports a missing browser by name, and
+  otherwise waits briefly and reports the exit code and stderr if the
+  handler died. A handler that works stays alive; one that is going to
+  fail fails immediately.
+- **New prompt rule, stated bluntly**: never say something is on his
+  screen, open, running, installed or done unless a tool came back and
+  said so - and being wrong about what you just did is worse than doing
+  nothing. Filling a sidebar card is not putting something on his
+  screen.
+- **Sharper Arch/CachyOS commands.** Never a bare `-S`, never `-Sy` on
+  its own (a partial upgrade breaks the system), `pacman -Q/-Qi/-Ss/-Si`
+  for queries, and AUR packages need `paru`/`yay` - pacman cannot
+  install them and should not be offered as if it can. CachyOS is Arch
+  underneath, but ships its own kernel and repos and should not be told
+  to replace either.
+- **New `tests/test_no_false_claims.py`** covering all three sources,
+  including that the offending sentence is gone from the source, that a
+  failed feed is named, and that a missing browser or absent display is
+  reported rather than assumed away.
+
 ## 2.5.3 - formatting stopped falling off replies
 
 - **Overlapping tags were stripping the formatting off whole replies.**

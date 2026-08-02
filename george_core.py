@@ -39,7 +39,7 @@ from george_platform import IS_WINDOWS
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "2.5.3"
+VERSION = "2.6.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = osx.config_dir()
@@ -1398,23 +1398,43 @@ def _feed_entries(xml_text: str, source: str,
     return out
 
 
-def fetch_news(feeds: List[List[str]], per_feed: int = 5,
-               topic: str = "") -> List[Dict[str, str]]:
+def fetch_news_detailed(feeds: List[List[str]], per_feed: int = 5,
+                        topic: str = "") -> Tuple[List[Dict[str, str]],
+                                                  List[str], int]:
+    """Headlines, plus WHICH feeds failed and how many were tried.
+
+    fetch_news used to swallow every failure into the log, so a caller
+    that got one headline back could not tell the difference between
+    "the world is quiet" and "six of seven feeds are refusing us".  That
+    is how George ended up reporting "1 headlines" with a straight face.
+    """
     items: List[Dict[str, str]] = []
+    failures: List[str] = []
+    tried = 0
     for entry in feeds:
         try:
             name, url = entry[0], entry[1]
         except (IndexError, TypeError):
             continue
+        tried += 1
         try:
-            items.extend(_feed_entries(http_get(url, timeout=15), name,
-                                       per_feed))
+            got = _feed_entries(http_get(url, timeout=15), name, per_feed)
+            if not got:
+                failures.append("%s (returned nothing)" % name)
+            items.extend(got)
         except Exception as exc:
             log("feed %s failed: %s" % (name, exc))
+            failures.append("%s (%s)" % (name, str(exc)[:60]))
     if topic:
         t = topic.lower()
         items = [i for i in items
                  if t in i["title"].lower() or t in i["summary"].lower()]
+    return items, failures, tried
+
+
+def fetch_news(feeds: List[List[str]], per_feed: int = 5,
+               topic: str = "") -> List[Dict[str, str]]:
+    items, _fail, _tried = fetch_news_detailed(feeds, per_feed, topic)
     return items
 
 
@@ -1771,6 +1791,14 @@ def weather(location: str = "") -> Dict[str, str]:
 
 
 def open_in_browser(url: str, cfg: Dict[str, Any]) -> str:
+    """Open a URL on his screen, and report what ACTUALLY happened.
+
+    This used to return "opened X on screen" the instant Popen did not
+    raise -- which only proves the binary exists, not that anything came
+    up.  With no DISPLAY, no browser registered, or a broken xdg-open,
+    the process exits non-zero a moment later and George had already
+    told him it was on screen.  Give it a beat and check.
+    """
     if not re.match(r"^https?://", url):
         url = "https://" + url
     browser = (cfg.get("browser") or "").strip()
@@ -1778,14 +1806,38 @@ def open_in_browser(url: str, cfg: Dict[str, Any]) -> str:
         result = osx.win_open(url)
         return ("opened %s on screen" % url) if result.startswith("opened") \
             else result
-    cmd = [browser, url] if browser else ["xdg-open", url]
+
+    if not IS_WINDOWS and not (os.environ.get("DISPLAY")
+                               or os.environ.get("WAYLAND_DISPLAY")):
+        return ("no graphical session (no DISPLAY or WAYLAND_DISPLAY), so "
+                "nothing can be put on screen from here")
+
+    exe = browser or "xdg-open"
+    if shutil.which(exe) is None:
+        return ("cannot open a browser: %s is not installed. Set a browser "
+                "in Settings, or install xdg-utils." % exe)
+    cmd = [exe, url]
     try:
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL,
-                         **osx.spawn_kwargs(detach=True))
-        return "opened %s on screen" % url
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE,
+                                **osx.spawn_kwargs(detach=True))
     except Exception as exc:
         return "could not open browser: %s" % exc
+    try:
+        # A handler that is going to fail usually fails immediately. A
+        # handler that worked normally stays alive (or forks and exits 0).
+        rc = proc.wait(timeout=2.5)
+    except subprocess.TimeoutExpired:
+        return "opened %s on screen" % url
+    if rc == 0:
+        return "opened %s on screen" % url
+    err = ""
+    try:
+        err = (proc.stderr.read() or b"").decode("utf-8", "replace").strip()
+    except Exception:
+        pass
+    return ("could not open %s on screen: %s exited %d%s"
+            % (url, exe, rc, (" - " + err[:160]) if err else ""))
 
 
 def launch_app(name: str) -> str:

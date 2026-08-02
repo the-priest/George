@@ -29,6 +29,18 @@ python3 tests/test_gate_fuzz.py || fail=1
 step "agent loop (mock ollama)"
 python3 tests/test_agent_loop.py || fail=1
 
+echo "== greetings and canned final answers =="
+python3 tests/test_greeting_reply.py || fail=1
+
+echo "== sweep findings (retention, growth, atomic writes) =="
+python3 tests/test_scan_2_5_2.py || fail=1
+
+echo "== inline markdown -> pango =="
+python3 tests/test_markup.py || fail=1
+
+echo "== design lint (contrast, type scale, sheet) =="
+python3 tests/test_design.py || fail=1
+
 step "ollama lifecycle"
 python3 tests/test_lifecycle.py || fail=1
 

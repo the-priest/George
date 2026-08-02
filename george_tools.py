@@ -117,6 +117,17 @@ TOOLS
 {tools}
 
 RULES
+- Not every message needs a tool. Greetings, thanks, chit-chat, opinions, \
+explanations, definitions, maths you can do in your head, and follow-up \
+questions about something already on screen are all answered DIRECTLY with \
+the `answer` tool on the first step. Reaching for a tool to say hello wastes \
+his time and gives him a status line instead of a reply.
+- Reach for a tool only when the answer depends on something you cannot know \
+from here: what is happening in the world, what is on this machine right now, \
+what a page says, or when he asks you to DO something.
+- `answer` is your reply to him in your own words, not a status report. Never \
+answer with "Done.", "OK." or "Already on screen." - say what you found or \
+what you did, in a sentence he would want to hear.
 - Do not guess at anything current. The date, news, weather, prices, what is on \
 his disk: look it up with a tool first, then answer from what came back.
 - "show me", "put it on screen", "open it" means the `show` or `open_path` \
@@ -785,6 +796,37 @@ class Agent:
         msgs.extend(self.history[-budget:])
         return msgs
 
+    # Only the last HISTORY_CAP entries are ever kept.  messages() sends
+    # 24, so everything past this is dead weight that was being carried in
+    # RAM and rewritten to disk on every single turn.
+    HISTORY_CAP = 80
+
+    def trim_history(self) -> None:
+        """Drop history the model will never see again.
+
+        A 14-step turn appends up to ~30 entries, several of them 6 KB
+        tool observations.  Left alone, a long session grew without
+        bound and _save_session wrote the whole thing out again every
+        turn.
+        """
+        if len(self.history) > self.HISTORY_CAP:
+            self.history = self.history[-self.HISTORY_CAP:]
+
+    def conversation(self) -> List[Dict[str, str]]:
+        """History with the tool observations stripped out.
+
+        Observations are context for the model, not conversation.  The
+        history dialog already skips them on restore, so persisting them
+        was pure waste -- and they are the bulk of the bytes.
+        """
+        out = []
+        for m in self.history:
+            content = str(m.get("content", ""))
+            if m.get("role") == "user" and content.startswith("OBSERVATION"):
+                continue
+            out.append(m)
+        return out
+
     def reset(self) -> None:
         self.history = []
 
@@ -835,6 +877,10 @@ class Agent:
         self.stop_event.clear()
         self.history.append({"role": "user", "content": user_text})
         last_calls: List[str] = []
+        # Whether any real tool ran this turn.  A canned final answer only
+        # needs repairing if there was something to report in the first
+        # place -- "ok" in the middle of a chat is a fine thing to say.
+        ran_tool_this_turn = False
         try:
             if not self.ollama.alive():
                 raise OllamaError(
@@ -893,9 +939,13 @@ class Agent:
                     sig = tool + json.dumps(args, sort_keys=True)[:200]
                     log("agent: tool call candidate %s args=%s" % (tool, json.dumps(args, sort_keys=True)))
                     try:
-                        dedupe_threshold = int(self.cfg.get("dedupe_repeat_threshold", 2) or 2)
+                        # `or 2` would turn a configured 0 into 2, because
+                        # 0 is both a legitimate value and falsy.  Coerce
+                        # explicitly.
+                        raw = self.cfg.get("dedupe_repeat_threshold", 1)
+                        dedupe_threshold = int(raw if raw is not None else 1)
                     except (TypeError, ValueError):
-                        dedupe_threshold = 2
+                        dedupe_threshold = 1
                     if last_calls.count(sig) >= dedupe_threshold:
                         # Add a terse observation; do not let the model
                         # produce a canned confirmation in the transcript.
@@ -905,6 +955,7 @@ class Agent:
                     last_calls.append(sig)
 
                     result = self.call_tool(tool, args)
+                    ran_tool_this_turn = True
                     if len(result) > 6000:
                         # A 7B model on an 8k window drowns in a huge
                         # observation and starts ignoring the question.
@@ -913,28 +964,9 @@ class Agent:
                     log("agent: tool %s returned %d chars" % (tool, len(result)))
 
                 if final_text is not None:
-                    # If the model's final answer is just a short canned
-                    # confirmation (e.g. "Done."), replace it with a more
-                    # informative summary drawn from the last observation so
-                    # the user hears something meaningful.
-                    try:
-                        short_final_len = int(self.cfg.get("short_final_len", 20) or 20)
-                    except (TypeError, ValueError):
-                        short_final_len = 20
-                    canned = ("done", "done.", "ok", "ok.", "already on screen", "already on screen.")
-                    is_short = len(final_text.strip()) <= short_final_len
-                    if (final_text.strip().lower() in canned or is_short) and self.cfg.get("final_replacement_enabled", True):
-                        # prefer recent observations from prior steps if present
-                        source_obs = observations or recent_observations
-                        if source_obs:
-                            last_obs = source_obs[-1]
-                            body = last_obs.split('\n', 1)[1] if '\n' in last_obs else last_obs
-                            summary = body.strip().split('\n')[0][:400]
-                            # redact obvious filesystem paths and collapse whitespace
-                            summary = re.sub(r'([A-Za-z]:\\\\[^\s]+|/[^\s]+)', '[REDACTED_PATH]', summary)
-                            summary = re.sub(r'\s+', ' ', summary).strip()
-                            log("agent: replacing short final '%s' with observation summary" % final_text[:40])
-                            final_text = summary
+                    final_text = self._repair_final(
+                        final_text, observations, recent_observations,
+                        model, ran_tool_this_turn)
                     self.on_final(final_text)
                     self.tts.speak(final_text)
                     break
@@ -959,7 +991,82 @@ class Agent:
             self.on_error("something broke: %s" % exc)
         finally:
             self.busy = False
+            self.trim_history()
             self.on_done()
+
+    # ---- final answer repair ------------------------------------------
+    _CANNED = frozenset((
+        "done", "ok", "okay", "sure", "got it", "all done", "finished",
+        "complete", "completed", "success", "done!", "task complete",
+        "already on screen", "it is on screen", "opened", "here you go",
+        "as requested", "no problem", "understood", "acknowledged",
+    ))
+
+    @staticmethod
+    def _is_canned(text: str) -> bool:
+        """True only for a status grunt, never for a short real answer.
+
+        This used to be `len(text) <= 20`, which meant "Hey, what's up?",
+        "Yes, it's fine." and "It's 14 degrees." were all treated as
+        failures and thrown away.  Length is not evidence of anything --
+        a good answer to "hi" is short BY DESIGN.  Match the actual
+        phrases instead.
+        """
+        s = re.sub(r"[\s.!,]+$", "", str(text or "").strip().lower())
+        return s in Agent._CANNED
+
+    def _repair_final(self, final_text: str, observations: List[str],
+                      recent_observations: List[str], model: str,
+                      ran_tool: bool) -> str:
+        """Turn a status grunt back into a reply.
+
+        Only fires when the model answered with a canned confirmation AND
+        a tool actually ran -- a bare "ok" in the middle of a chat is a
+        perfectly good thing to say and is left alone.
+
+        The old code pasted the first line of raw tool output in as
+        George's spoken reply.  That is machine output, not an answer,
+        and it is what made a greeting come back as a status line.  Ask
+        the model for the reply it should have given instead, and only
+        fall back to the observation if that also comes up empty.
+        """
+        text = str(final_text or "").strip()
+        if not text:
+            text = "(no reply)"
+        if not ran_tool or not self._is_canned(text):
+            return text
+        if not self.cfg.get("final_replacement_enabled", True):
+            return text
+
+        log("agent: canned final %r after a tool ran; asking again" % text[:40])
+        try:
+            nudge = list(self.messages())
+            nudge.append({
+                "role": "user",
+                "content": ("That was a status message, not an answer. Tell "
+                            "him what you actually found or did, in one or "
+                            "two plain sentences, using the observations "
+                            "above. Reply with prose only - no JSON, no "
+                            "tool call."),
+            })
+            again = self.ollama.chat_stream(nudge, lambda _t: None,
+                                            self.stop_event, model=model)
+            again = strip_action_json(strip_reasoning(again or "")).strip()
+            if again and not self._is_canned(again):
+                return again
+        except Exception as exc:
+            log("agent: retry for a better final failed: %s" % exc)
+
+        # Last resort: the observation, tidied.  Better than "Done." but it
+        # is still machine output, so it is the fallback and not the plan.
+        source = observations or recent_observations
+        if source:
+            body = source[-1]
+            body = body.split("\n", 1)[1] if "\n" in body else body
+            summary = re.sub(r"\s+", " ", body).strip()[:400]
+            if summary:
+                return summary
+        return text
 
     def start(self, user_text: str) -> None:
         threading.Thread(target=self.run_turn, args=(user_text,),

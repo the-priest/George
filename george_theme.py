@@ -34,10 +34,16 @@ NEUTRAL: Dict[str, str] = {
     "card":      "#0e151d",   # card body
     "raised":    "#141d27",   # hovered / nested
     "line":      "#1c2836",   # borders
+    "line_hot":  "#2b3d51",   # border under the pointer
     "line_soft": "#131c25",   # hairlines inside cards
     "text":      "#e8f2fb",
     "dim":       "#8ea1b4",
-    "faint":     "#5a6b7d",
+    # `faint` carries timestamps, eyebrow labels and the hero
+    # subtitle -- all SMALL text, which WCAG holds to 4.5:1, not
+    # the 3:1 large-text floor. At #5a6b7d it was 3.35:1 on a
+    # card. This clears 4.5 on void, plate and card alike while
+    # staying clearly subordinate to `dim`.
+    "faint":     "#72859a",
     "ok":        "#3ddc84",
     "warn":      "#f5a524",
     "bad":       "#ff5a63",
@@ -122,6 +128,7 @@ def build_css(cfg: Dict[str, Any]) -> bytes:
     gap = 6 if compact else 10
     radius = 16
     radius_sm = 11
+    bubble = 18
 
     css = """
 /* ---- adwaita overrides: keep built-in controls on our palette ---- */
@@ -238,6 +245,16 @@ headerbar button:active, headerbar button:checked, .pill-btn:checked {
 
 .hud-card:hover { border-color: %(accent_deep)s; }
 
+/* A hairline under every card title.  It is the cheapest thing that
+   makes a stack of panels read as a stack of panels instead of one
+   long run of text. */
+.card-rule {
+    background-color: %(line_soft)s;
+    min-height: 1px;
+}
+
+.core-card .card-rule { background-color: %(accent_deep)s; }
+
 .core-card {
     background-image: linear-gradient(to bottom, %(accent_ghost)s, %(plate)s);
     border: 1px solid %(accent_deep)s;
@@ -282,21 +299,29 @@ headerbar button:active, headerbar button:checked, .pill-btn:checked {
     color: %(accent)s;
 }
 
-/* ---- chat bubbles ---- */
+/* ---- chat bubbles ----
+   The user's bubble is the accent one and sits right; George's is a
+   surface panel and sits left.  Both hug their text -- the widths are
+   capped in code with max_width_chars, not here, because GTK has no
+   max-width.  The one square corner on each is the tail. */
 .bubble-user {
     background-image: linear-gradient(to bottom, %(accent_deep)s,
                                       %(accent_ghost)s);
     border: 1px solid %(accent_deep)s;
-    border-radius: %(radius)dpx %(radius)dpx 4px %(radius)dpx;
-    padding: 11px 15px;
+    border-radius: %(bubble)dpx %(bubble)dpx 5px %(bubble)dpx;
+    padding: 10px 16px;
 }
+
+.bubble-user:hover { border-color: %(accent)s; }
 
 .bubble-ai {
     background-image: linear-gradient(to bottom, %(card)s, %(plate)s);
     border: 1px solid %(line)s;
-    border-radius: 4px %(radius)dpx %(radius)dpx %(radius)dpx;
-    padding: 12px 16px;
+    border-radius: 5px %(bubble)dpx %(bubble)dpx %(bubble)dpx;
+    padding: 12px 16px 8px 16px;
 }
+
+.bubble-ai:hover { border-color: %(line_hot)s; }
 
 .bubble-watch {
     background-image: linear-gradient(to bottom, %(accent_ghost)s,
@@ -305,13 +330,40 @@ headerbar button:active, headerbar button:checked, .pill-btn:checked {
 }
 
 .bubble-text { font-size: %(f)dpx; color: %(text)s; }
-.bubble-user .bubble-text { color: #ffffff; }
+.bubble-user .bubble-text { color: %(accent_light)s; }
+
+/* The little author strip only earns its space when it is quiet. */
+.bubble-name {
+    font-family: %(mono)s;
+    font-size: %(fxx)dpx;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: %(accent)s;
+}
+
+/* Per-message actions stay invisible until the pointer is on the
+   bubble, so a long transcript is not a wall of little buttons. */
+.msg-tools button {
+    min-width: 26px;
+    min-height: 26px;
+    padding: 0;
+    color: %(faint)s;
+    background-color: transparent;
+    border: none;
+    border-radius: 999px;
+    transition: color 140ms ease, background-color 140ms ease;
+}
+
+.msg-tools button:hover {
+    color: %(accent)s;
+    background-color: %(raised)s;
+}
 
 .avatar {
     background-image: linear-gradient(to bottom, %(accent)s, %(accent_deep)s);
     border-radius: 999px;
-    min-width: 26px;
-    min-height: 26px;
+    min-width: 24px;
+    min-height: 24px;
     color: %(void)s;
     font-family: %(mono)s;
     font-size: %(fx)dpx;
@@ -385,6 +437,11 @@ headerbar button:active, headerbar button:checked, .pill-btn:checked {
 }
 
 .composer:focus-within { border-color: %(accent)s; }
+
+.placeholder {
+    font-size: %(f)dpx;
+    color: %(faint)s;
+}
 
 textview, textview text {
     background-color: transparent;
@@ -529,6 +586,7 @@ tooltip {
         "accent_deep": p["accent_deep"], "accent_ghost": p["accent_ghost"],
         "void": p["void"], "plate": p["plate"], "card": p["card"],
         "raised": p["raised"], "line": p["line"], "line_soft": p["line_soft"],
+        "line_hot": p["line_hot"],
         "text": p["text"], "dim": p["dim"], "faint": p["faint"],
         "ok": p["ok"], "warn": p["warn"], "bad": p["bad"],
         "font": _FONT_STACK, "mono": _MONO_STACK,
@@ -536,7 +594,7 @@ tooltip {
         "fh": fh, "fbig": _px(26, scale), "fhero": _px(30, scale),
         "hbh": 54 if compact else 60,
         "pad": pad, "gap": gap,
-        "radius": radius, "radius_sm": radius_sm,
+        "radius": radius, "radius_sm": radius_sm, "bubble": bubble,
     }
 
     # The sheet is handed to GTK as bytes; anything non-ASCII that ever

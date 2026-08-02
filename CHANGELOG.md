@@ -1,5 +1,160 @@
 # George changelog
 
+## 2.5.3 - formatting stopped falling off replies
+
+- **Overlapping tags were stripping the formatting off whole replies.**
+  `md_to_pango` ran its bold, italic, code and link passes
+  independently, so the tags they produced could OVERLAP rather than
+  nest: `` `*`* `` became `<tt><span><i></span></tt></i>` and `******`
+  became `<b><i></b></i>`. Pango rejects overlapping tags, and
+  `safe_markup` falls back to plain text on a rejection - for the WHOLE
+  label. So one confusing fragment anywhere in an answer stripped the
+  bold, the links and the code styling out of ALL of it. Fuzzing put it
+  at roughly 1 input in 8.
+
+  Code spans and links are now pulled out behind placeholders before
+  the emphasis passes run, and put back afterwards, so overlap is
+  impossible by construction. 12,000 fuzzed inputs, zero rejections
+  (was 999 in 8,000).
+- **A code span is literal now**, which is what markdown says it is:
+  `` `a *b* c` `` shows the asterisks instead of italicising b.
+- **`faint` was scraping the contrast floor.** It carries timestamps,
+  eyebrow labels and the hero subtitle - all SMALL text, which WCAG
+  holds to 4.5:1, not the 3:1 large-text floor. At `#5a6b7d` it sat at
+  3.35:1 on a card. Now `#72859a`: clears 4.5:1 on void, plate and card
+  alike, still clearly subordinate to `dim`.
+- **New `tests/test_design.py`** - a design linter that runs without a
+  display: WCAG contrast for every text colour against every surface it
+  can land on, across all six accents; the type scale staying monotonic
+  and distinct at font scales from 0.75 to 2.0; and the sheet building
+  clean, ASCII-only, with no unsubstituted tokens and none of the CSS
+  GTK cannot parse.
+- **New `tests/test_markup.py`** - the two minimal overlap cases, the
+  realistic combinations, escaping, and the fuzz that found it.
+
+## 2.5.2 - sweep
+
+A systematic pass over the tree: the falsy-zero idiom, unbounded state,
+timer lifecycle, and write durability. Nothing here crashed - that is
+why none of it had been noticed.
+
+- **"0 = keep forever" was deleting his chats after a day.** `ChatStore.purge`
+  read the setting as `float(cfg.get(k) or 24)`, so a configured 0 became
+  24 and the `if hours <= 0: return` branch directly below it was
+  unreachable. The Settings row promising "keep forever" was doing the
+  opposite. This is the third time `or <default>` has bitten a value
+  where 0 is legitimate (watch_min_gap in 2.2.0, dedupe threshold in
+  2.5.1), so there is now a test that greps the tree for the pattern
+  against every config key whose floor is 0.
+- **espeak pitch 0 was ignored** for the same reason - the range is
+  0-99 and 0 is falsy.
+- **Conversation history grew without bound.** A 14-step turn appends up
+  to ~30 entries, several of them 6 KB tool observations, and
+  `messages()` only ever sends the last 24. Capped at 80.
+- **Every tool observation was being written to disk on every turn.**
+  `_save_session` persisted the raw history - including all those 6 KB
+  observations - and rewrote the entire chats file each time, while the
+  history dialog skipped them on restore. They were stored and never
+  read. Sessions now save the conversation only: a 900-entry test
+  history went from 162 KB to 212 bytes.
+- **Turning animations on while the HUD was hidden started a 15fps
+  redraw on an invisible widget** - and "unmap" could not fire again to
+  stop it, because it was already unmapped. A battery leak on a laptop.
+  `_on_map` now checks `get_mapped()`.
+- **`_write_json` only caught `OSError`.** `json.dump` raises `TypeError`
+  on anything it cannot serialise, which escaped the function entirely
+  and left a half-written `.tmp` behind. Now caught, the temp file is
+  cleaned up, the real file is untouched, and the write is fsynced
+  before the rename.
+- **New `tests/test_scan_2_5_2.py`** pinning all of the above.
+
+Checked and found clean: no bare `except:` anywhere, no mutable default
+arguments, every `subprocess` call carries a timeout (verified by AST
+walk, not grep), every repeating GLib timer returns a proper bool, no
+dangling tool aliases, TOOL_SPEC and the registry agree exactly, and
+LIMITS/CHOICES keys all exist in DEFAULTS. Fuzzed 3000 garbage configs
+through `coerce_config` + the theme builder, 6000 random strings through
+the action parsers, and 8000 through the safety gate: zero crashes.
+
+## 2.5.1 - George answers you instead of reporting to you
+
+He said "hi" and got back "Done." - or a line of raw news output. Two
+faults, stacked.
+
+- **Any reply of 20 characters or fewer was thrown away.** The
+  final-answer "repair" treated short as canned, and replaced the reply
+  with the first line of the last tool observation. But a good answer to
+  "hi" is short BY DESIGN. "Hey. What is up?", "Yes, it's fine.",
+  "It's 14 degrees." and "No." were all discarded and swapped for
+  machine output. Length is not evidence of anything; the canned check
+  now matches actual status phrases ("done", "ok", "task complete") and
+  nothing else.
+- **Nothing in the prompt said a tool was optional.** The model reached
+  for `news` or `system` to say hello, which is what manufactured the
+  observation the first fault then pasted in. The prompt now states
+  plainly that greetings, thanks, chit-chat, opinions, explanations and
+  follow-ups are answered directly on the first step, and that `answer`
+  is a reply in his own words - never "Done." or "Already on screen."
+- **The repair asks again instead of pasting.** When the model really
+  does emit a status grunt after a tool ran, George now asks it for the
+  reply it should have given, and only falls back to the observation if
+  that comes up empty too. Raw tool output was never an answer.
+- **Repair only fires when a tool actually ran.** A bare "ok" in the
+  middle of a conversation is a fine thing to say and is left alone.
+- **Dropped the path redaction.** It rewrote his own local paths to
+  `[REDACTED_PATH]` in George's spoken replies. This is his machine.
+- **Fixed a falsy-zero bug** in the dedupe threshold: `cfg.get(k, 2) or 2`
+  turned a configured 0 into 2, because 0 is both legitimate and falsy.
+- **New `tests/test_greeting_reply.py`** - pins short real answers
+  surviving intact, greetings not costing a tool call, canned grunts
+  being repaired by retry rather than paste, and the prompt actually
+  containing the permission. Verified by restoring the old logic and
+  watching it fail with 7 errors, including the reported case.
+
+## 2.5.0 - the theme actually reaches the screen
+
+The look was already written. It was being thrown away at startup.
+
+- **The whole stylesheet was being wiped by one line.**
+  `Gtk.CssProvider.load_from_data` REPLACES a provider's contents - it
+  does not append. `_install_css` loaded the theme, then loaded a second
+  little rule to put the bundled `george.png` behind the chat, and that
+  second call deleted all 29 KB of the first one. With a `george.png` in
+  the folder - which every checkout has - George fell back to stock
+  Adwaita: no message bubbles, no HUD card backgrounds, a grey headerbar.
+  There was no error, because nothing had gone wrong as far as GTK was
+  concerned. The sheet is now built once, concatenated once, and loaded
+  once.
+- **Bubbles never aligned.** `_row` set `halign` on the bubble, but a
+  `Gtk.Box` only hands spare width to a child that asks for it, so there
+  was nothing for `halign` to align within and every message - his and
+  George's - stacked up on the left. His bubbles now sit right where
+  they belong.
+- **Bubble geometry.** Widths are capped in code (GTK CSS has no
+  max-width), so a one-line question is a one-line bubble instead of a
+  full-width slab. Rounder corners, one square corner as the tail, the
+  accent fill on his side and a surface panel on George's.
+- **Per-message buttons fade in on hover.** A long transcript is no
+  longer a column of little play/copy icons competing with the text.
+- **The HUD toggle is a toggle.** It shows whether the HUD is up, the
+  icon and tooltip follow the state, F9 and the button no longer drift
+  apart, and hiding then showing restores the width he had dragged it to
+  rather than snapping back to the default.
+- **Sidebar.** A hairline under every card title so a stack of panels
+  reads as a stack of panels; ENGINE moved above WEATHER because it is
+  the card you need when something is wrong; values too long for the
+  column keep their full text in a tooltip instead of ellipsising into
+  nothing.
+- **The composer has a placeholder.** `Gtk.TextView` has none of its
+  own, so it is an overlay label that hides on the first keystroke.
+- **New setting: Artwork behind the chat.** The wallpaper that caused
+  all this is now a real, switchable feature rather than a side effect.
+- **Regression tests.** `tests/test_ui.py` now reads the live provider
+  back and fails if the sheet has lost its bubbles, cards, composer or
+  headerbar, or if it comes back suspiciously small; and it pins the
+  `hexpand`/`halign` pair that makes alignment possible at all.
+  Verified by reintroducing both bugs and watching it fail.
+
 ## 2.4.0 - Windows
 
 George now runs natively on Windows, and the repo builds a real `.exe`

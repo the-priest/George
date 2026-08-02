@@ -374,7 +374,13 @@ class TextToSpeech:
             return
         if self._engine == "espeak" and self._espeak:
             rate = str(int(165 * speed))
-            pitch = str(int(self.cfg.get("voice_pitch", 38) or 38))
+            # espeak pitch 0 is a legitimate setting (the range is 0-99),
+            # and it is falsy, so `or 38` silently ignored it.
+            _p = self.cfg.get("voice_pitch", 38)
+            try:
+                pitch = str(int(_p if _p is not None else 38))
+            except (TypeError, ValueError):
+                pitch = "38"
             voice = str(self.cfg.get("piper_voice_pref", "en_GB")
                         ).lower().replace("_", "-")
             argv = [self._espeak, "-s", rate, "-p", pitch, "-a", "190"]

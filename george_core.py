@@ -39,7 +39,7 @@ from george_platform import IS_WINDOWS
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "2.4.0"
+VERSION = "2.5.3"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = osx.config_dir()
@@ -98,6 +98,7 @@ DEFAULTS: Dict[str, Any] = {
     "persona": "jarvis",             # jarvis | plain | blunt
     "accent": "cyan",                # cyan | amber | violet | green | red
     "ui_density": "comfortable",     # comfortable | compact
+    "wallpaper": True,               # bundled art washed in behind the chat
     "animations": True,
     "safe_graphics": False,          # cairo renderer; see the runtime hook
     "show_reasoning": True,
@@ -114,8 +115,9 @@ DEFAULTS: Dict[str, Any] = {
     "browser": "",                   # blank = xdg-open
     "user_name": "",
     # Tunables for agent behaviour
-    "short_final_len": 20,               # <= this length considered 'short' for replacement
-    "dedupe_repeat_threshold": 1,        # how many times the same tool+args may run before dedupe (1 = skip immediate on repeat)
+    # How many times the same tool+args may run before it is skipped.
+    "dedupe_repeat_threshold": 1,
+    # A canned "Done." after a tool ran is re-asked rather than shipped.
     "final_replacement_enabled": True,
 }
 
@@ -925,9 +927,20 @@ def _write_json(path: str, obj: Any) -> None:
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(obj, fh, indent=2, ensure_ascii=False)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, path)
-    except OSError as exc:
+    except (OSError, TypeError, ValueError) as exc:
+        # json.dump raises TypeError on anything it cannot serialise, and
+        # that was escaping this function entirely -- taking down whatever
+        # called it and leaving a half-written .tmp behind. The real file
+        # is untouched either way, which is the point of writing via a
+        # temp and os.replace.
         log("write %s failed: %s" % (path, exc))
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 class MemoryStore:
@@ -978,7 +991,16 @@ class ChatStore:
         self.purge()
 
     def purge(self) -> None:
-        hours = float(self.cfg.get("chat_retention_hours") or 24)
+        # 0 means KEEP FOREVER -- the Settings row says so. `or 24` made
+        # that branch unreachable, because 0 is both a legitimate value
+        # and falsy, so "keep forever" quietly deleted his chats after a
+        # day. Coerce explicitly; never use `or` to default a number that
+        # is allowed to be zero.
+        raw = self.cfg.get("chat_retention_hours", 24)
+        try:
+            hours = float(raw if raw is not None else 24)
+        except (TypeError, ValueError):
+            hours = 24.0
         if hours <= 0:
             return
         cutoff = time.time() - hours * 3600.0

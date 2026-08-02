@@ -62,8 +62,18 @@ class _Animated(Gtk.DrawingArea):
             self.queue_draw()
 
     def _on_map(self, *_a: Any) -> None:
+        # get_mapped() matters: set_animate(True) calls straight in here,
+        # and if the HUD is hidden at the time (sidebar collapsed, another
+        # dialog up) this would start a 15fps redraw on a widget nobody
+        # can see -- and "unmap" will not fire again to stop it, because
+        # it is already unmapped. That is a battery leak on a laptop.
         if self._tick_id or not self._animate:
             return
+        try:
+            if not self.get_mapped():
+                return
+        except Exception:
+            pass
         self._tick_id = GLib.timeout_add(int(1000 / self._fps), self._tick)
 
     def _on_unmap(self, *_a: Any) -> None:
@@ -502,7 +512,12 @@ class StateDot(_Animated):
 
 _FENCE = re.compile(r"```([A-Za-z0-9_+-]*)\n?(.*?)```", re.S)
 _BOLD = re.compile(r"\*\*(.+?)\*\*", re.S)
-_ITAL = re.compile(r"(?<![\w*])\*([^*\n]+?)\*(?![\w*])")
+# No angle brackets in the italic body: by the time this pass runs,
+# code spans and links are already behind placeholders, so a `<` can
+# only be a tag this converter produced -- and matching across one
+# produces <b><i></b></i>, which Pango rejects and which costs the reply
+# ALL of its formatting. `******` was the minimal case.
+_ITAL = re.compile(r"(?<![\w*])\*([^*\n<>]+?)\*(?![\w*])")
 _CODE = re.compile(r"`([^`\n]+?)`")
 _LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
 _HEAD = re.compile(r"^(#{1,6})\s+(.*)$")
@@ -539,12 +554,47 @@ def md_to_pango(text: str, code_colour: str = "#9fe9ff",
         out_lines.append(line)
     s = "\n".join(out_lines)
 
-    s = _LINK.sub(lambda m: "<a href='%s'>%s</a>" % (
-        m.group(2).replace("'", "%27"), m.group(1)), s)
+    # Code spans come out FIRST, behind placeholders that contain no
+    # markdown characters, and go back in LAST.
+    #
+    # Doing them last -- as this used to -- let the passes interleave.
+    # `*`* produced <tt><span><i></span></tt></i>: overlapping, not
+    # nested. Pango rejects that, so safe_markup fell back to plain text
+    # and the WHOLE reply silently lost every bit of its formatting, not
+    # just the fragment that confused it. Roughly 2% of fuzzed inputs
+    # hit it.
+    #
+    # Extracting first also makes a code span literal, which is what
+    # markdown says it is: `a *b* c` should show the asterisks, not
+    # italicise b.
+    spans: List[str] = []
+
+    def _stash(m: "re.Match") -> str:
+        spans.append("<tt><span foreground='%s'>%s</span></tt>"
+                     % (code_colour, m.group(1)))
+        return "\x00%d\x00" % (len(spans) - 1)
+
+    s = _CODE.sub(_stash, s)
+
+    # Links are stashed too, so that emphasis can still WRAP a link
+    # ("**see [the wiki](url)**") without the italic pass being able to
+    # match across the <a> tag it would have to step over.
+    def _stash_link(m: "re.Match") -> str:
+        spans.append("<a href='%s'>%s</a>"
+                     % (m.group(2).replace("'", "%27"), m.group(1)))
+        return "\x00%d\x00" % (len(spans) - 1)
+
+    s = _LINK.sub(_stash_link, s)
     s = _BOLD.sub(lambda m: "<b>%s</b>" % m.group(1), s)
     s = _ITAL.sub(lambda m: "<i>%s</i>" % m.group(1), s)
-    s = _CODE.sub(lambda m: "<tt><span foreground='%s'>%s</span></tt>"
-                  % (code_colour, m.group(1)), s)
+
+    # Restore until stable: a stashed link's text can itself contain a
+    # stashed code span, so one pass is not always enough.
+    for _ in range(4):
+        if "\x00" not in s:
+            break
+        s = re.sub(r"\x00(\d+)\x00",
+                   lambda m: spans[int(m.group(1))], s)
     return s
 
 

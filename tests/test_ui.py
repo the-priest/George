@@ -51,6 +51,43 @@ def p2():
         res["errors"].append("no user bubble: %s" % css)
     if not any("bubble-ai" in c for c in css):
         res["errors"].append("no ai bubble: %s" % css)
+    # THE BUG THIS FILE EXISTS TO CATCH NOW:
+    # Gtk.CssProvider.load_from_data REPLACES the provider's contents.
+    # A second load_from_data for the wallpaper rule silently threw the
+    # entire stylesheet away, so every bubble and card lost its
+    # background and the app fell back to stock Adwaita. Assert that the
+    # live provider still holds BOTH the theme and the extra rule.
+    try:
+        sheet = w.css_provider.to_string()
+    except Exception as exc:
+        sheet = ""
+        res["errors"].append("provider unreadable: %r" % exc)
+    for needed in (".bubble-user", ".bubble-ai", ".hud-card", ".composer",
+                   "headerbar"):
+        if needed not in sheet:
+            res["errors"].append("stylesheet lost %s" % needed)
+    import os.path as _op
+    _art = any(_op.isfile(_op.join(_op.dirname(_op.dirname(
+        _op.abspath(__file__))), n)) for n in ("george-bg.png", "george.png"))
+    if _art and ".chat-bg" not in sheet:
+        res["errors"].append("wallpaper rule missing from the sheet")
+    res["sheet_bytes"] = len(sheet)
+    if len(sheet) < 4000:
+        res["errors"].append("stylesheet suspiciously small: %d" % len(sheet))
+
+    # Bubbles have to be able to align: a Gtk.Box only positions a child
+    # by halign if that child expands, so pin the property that makes
+    # right-aligned user bubbles work at all.
+    for row in texts(w.transcript):
+        kid = row.get_first_child()
+        if kid is None:
+            continue
+        if "bubble-user" in " ".join(kid.get_css_classes()):
+            if kid.get_halign() != GUI.Gtk.Align.END:
+                res["errors"].append("user bubble not aligned END")
+            if not kid.get_hexpand():
+                res["errors"].append("user bubble cannot align: no hexpand")
+
     for name, fn in (("models", w._open_models), ("settings", w._open_settings),
                      ("history", w._open_history), ("about", w._open_about),
                      ("shortcuts", w._open_shortcuts)):

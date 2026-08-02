@@ -25,6 +25,7 @@ import signal
 import sys
 import threading
 import time
+import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gi
@@ -129,8 +130,12 @@ def _card(title: str, action: Optional[Gtk.Widget] = None,
     lbl.set_hexpand(True)
     head.append(lbl)
     if action is not None:
+        action.set_valign(Gtk.Align.CENTER)
         head.append(action)
     outer.append(head)
+    rule = _box()
+    rule.add_css_class("card-rule")
+    outer.append(_margins(rule, 0, 2, 0, 0))
     body = _box(spacing=5)
     outer.append(body)
     return outer, body
@@ -143,6 +148,11 @@ def _kv_row(key: str, value: str) -> Gtk.Box:
     k.set_ellipsize(Pango.EllipsizeMode.END)
     v = _label(value, "hud-val", wrap=False, xalign=1.0)
     v.set_ellipsize(Pango.EllipsizeMode.END)
+    # The sidebar is narrow and some values (disk lines, hostnames) do not
+    # fit.  Ellipsising without a tooltip just loses the number, so keep
+    # the full text one hover away.
+    if len(value) > 18:
+        v.set_tooltip_text(value)
     row.append(k)
     row.append(v)
     return row
@@ -231,37 +241,47 @@ class AiBubble:
     def __init__(self, win: "GeorgeWindow", text: str = "") -> None:
         self.win = win
         self.text = text
-        self.box = _box(spacing=8)
+        self.box = _box(spacing=6)
         self.box.add_css_class("bubble-ai")
-        log("ui: AiBubble.__init__ css=%s text=%s" % (self.box.get_css_classes(), text[:40]))
 
         head = _box(horizontal=True, spacing=8)
         av = _label("G", "avatar", wrap=False, xalign=0.5)
-        av.set_size_request(26, 26)
-        av.set_valign(Gtk.Align.START)
+        av.set_size_request(24, 24)
+        av.set_valign(Gtk.Align.CENTER)
         head.append(av)
-        name = _label(APP_NAME.upper(), "hud-title", wrap=False)
+        name = _label(APP_NAME.upper(), "bubble-name", wrap=False)
+        name.set_valign(Gtk.Align.CENTER)
         name.set_hexpand(True)
         head.append(name)
         head.append(_label(time.strftime("%H:%M"), "stamp", wrap=False))
         self.box.append(head)
 
-        self.content = _box(spacing=8)
+        self.content = _box(spacing=10)
         self.box.append(self.content)
 
         self.stream_label = _label(text, "bubble-text", selectable=True)
-        self.stream_label.set_max_width_chars(84)
+        self.stream_label.set_max_width_chars(BUBBLE_CHARS)
         self.content.append(self.stream_label)
 
-        tools = _box(horizontal=True, spacing=2)
-        tools.set_halign(Gtk.Align.END)
+        # The per-message actions are only drawn while the pointer is over
+        # the bubble.  A transcript of twenty replies should not be twenty
+        # rows of little buttons competing with the text.
+        self.tools = _box(horizontal=True, spacing=2)
+        self.tools.add_css_class("msg-tools")
+        self.tools.set_halign(Gtk.Align.END)
+        self.tools.set_opacity(0.0)
         play = _icon_button("media-playback-start-symbolic", "Read this aloud")
         play.connect("clicked", lambda *_a: self.win.tts.speak(self.text))
         copy = _icon_button("edit-copy-symbolic", "Copy this reply")
         copy.connect("clicked", lambda *_a: self.win.copy(self.text))
-        tools.append(play)
-        tools.append(copy)
-        self.box.append(tools)
+        self.tools.append(play)
+        self.tools.append(copy)
+        self.box.append(self.tools)
+
+        hover = Gtk.EventControllerMotion()
+        hover.connect("enter", lambda *_a: self.tools.set_opacity(1.0))
+        hover.connect("leave", lambda *_a: self.tools.set_opacity(0.0))
+        self.box.add_controller(hover)
 
     def set_streaming_text(self, text: str) -> None:
         self.text = text
@@ -271,7 +291,6 @@ class AiBubble:
     def finalise(self, text: str) -> None:
         """Swap the plain streaming label for rendered blocks."""
         self.text = text
-        log("ui: AiBubble.finalise text=%s" % (text[:80]))
         try:
             _clear(self.content)
             self.stream_label = None
@@ -282,7 +301,7 @@ class AiBubble:
                         hud.code_card(lang, body, self.win.copy))
                     continue
                 lbl = _label("", "bubble-text", selectable=True)
-                lbl.set_max_width_chars(84)
+                lbl.set_max_width_chars(BUBBLE_CHARS)
                 hud.safe_markup(lbl, body, colours["accent_light"],
                                 colours["faint"])
                 lbl.connect("activate-link", self.win.on_link)
@@ -291,13 +310,21 @@ class AiBubble:
             log("rich render failed, falling back to plain: %s" % exc)
             _clear(self.content)
             self.stream_label = _label(text, "bubble-text", selectable=True)
-            self.stream_label.set_max_width_chars(84)
+            self.stream_label.set_max_width_chars(BUBBLE_CHARS)
             self.content.append(self.stream_label)
 
 
 # =====================================================================
 # MAIN WINDOW
 # =====================================================================
+
+# How wide a bubble may get before it wraps.  GTK has no max-width in
+# CSS, so this is the only place the cap can live.  Long lines are hard
+# to read; ~74 characters is about where prose stops being comfortable.
+SIDEBAR_WIDTH = 336
+
+BUBBLE_CHARS = 74
+USER_BUBBLE_CHARS = 58
 
 SUGGESTIONS = [
     ("What is on the news?", "news-symbolic"),
@@ -359,34 +386,29 @@ class GeorgeWindow(Adw.ApplicationWindow):
             provider.connect("parsing-error", self._on_css_error)
         except Exception:
             pass                      # older GTK: signal is not there
+
+        # ONE sheet, ONE load.  Gtk.CssProvider.load_from_data REPLACES the
+        # provider's contents -- it does not append -- so anything extra has
+        # to be concatenated onto the sheet BEFORE it is handed over.  This
+        # was the bug that silently wiped the entire theme whenever a
+        # george.png sat next to the script.
         try:
-            provider.load_from_data(build_css(self.cfg))
+            sheet = build_css(self.cfg)
         except Exception as exc:
             log("theme build failed (%s); using the fallback sheet" % exc)
+            sheet = FALLBACK_CSS
+
+        sheet = sheet + self._wallpaper_css()
+
+        try:
+            provider.load_from_data(sheet)
+        except Exception as exc:
+            log("stylesheet load failed (%s); using the fallback sheet" % exc)
             try:
                 provider.load_from_data(FALLBACK_CSS)
             except Exception:
                 return
-        # If a bundled george.png exists next to the script, add a background
-        # CSS rule that uses it as a large centered background for the chat.
-        # Do not set `opacity` on the container (it affects children). Instead
-        # overlay a dark translucent gradient above the image so text stays
-        # readable while the art shows through.
-        try:
-            bg = os.path.join(os.path.dirname(__file__), "george.png")
-            if os.path.isfile(bg):
-                bg_url = "file://" + os.path.abspath(bg)
-                extra = ('\n.chat-bg { background-image: linear-gradient(rgba(5,7,10,0.86), '
-                         'rgba(5,7,10,0.86)), url("%s"); '
-                         'background-size: cover; background-position: center; '
-                         'background-repeat: no-repeat; }\n' % bg_url)
-                try:
-                    provider.load_from_data(extra.encode("utf-8"))
-                except Exception as _:
-                    # Non-fatal: the main stylesheet already provides the UI
-                    log("could not load background image css: %s" % bg)
-        except Exception:
-            pass
+
         display = Gdk.Display.get_default()
         if display is None:
             log("no display; skipping stylesheet")
@@ -400,6 +422,41 @@ class GeorgeWindow(Adw.ApplicationWindow):
         Gtk.StyleContext.add_provider_for_display(
             display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.css_provider = provider
+
+    def _wallpaper_css(self) -> bytes:
+        """Optional bundled art behind the transcript, as an ASCII byte
+        string ready to be appended to the sheet.
+
+        Returns b"" when there is nothing to show or the config has it
+        switched off -- never raises, and never replaces the sheet.
+        """
+        if not bool(self.cfg.get("wallpaper", True)):
+            return b""
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            for name in ("george-bg.png", "george.png"):
+                bg = os.path.join(here, name)
+                if not os.path.isfile(bg):
+                    continue
+                url = urllib.parse.quote(os.path.abspath(bg))
+                # Two stacked layers: a heavy dark wash on top so text keeps
+                # its contrast, the art underneath.  cover + center means it
+                # never tiles and never stretches oddly.
+                rule = (
+                    "\n.chat-bg {\n"
+                    "  background-image:\n"
+                    "    linear-gradient(to bottom, rgba(5,7,10,0.955),"
+                    " rgba(5,7,10,0.90)),\n"
+                    '    url("file://%s");\n'
+                    "  background-size: auto, cover;\n"
+                    "  background-position: center, center;\n"
+                    "  background-repeat: no-repeat, no-repeat;\n"
+                    "}\n" % url
+                )
+                return rule.encode("ascii", "ignore")
+        except Exception as exc:                        # pragma: no cover
+            log("wallpaper css skipped: %s" % exc)
+        return b""
 
     @staticmethod
     def _on_css_error(_provider: Any, section: Any, error: Any) -> None:
@@ -455,7 +512,7 @@ class GeorgeWindow(Adw.ApplicationWindow):
         root.append(self._build_header())
 
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self.paned.set_position(340)
+        self.paned.set_position(SIDEBAR_WIDTH)
         self.paned.set_vexpand(True)
         self.paned.set_start_child(self._build_sidebar())
         self.paned.set_end_child(self._build_chat())
@@ -474,9 +531,15 @@ class GeorgeWindow(Adw.ApplicationWindow):
         title.append(self.subtitle)
         hb.set_title_widget(title)
 
-        toggle = _icon_button("sidebar-show-symbolic", "Toggle the HUD  (F9)")
-        toggle.connect("clicked", self._on_toggle_sidebar)
-        hb.pack_start(toggle)
+        # A toggle, not a plain button: the header should say whether the
+        # HUD is up without him having to look at the window.
+        self.sidebar_btn = Gtk.ToggleButton()
+        self.sidebar_btn.set_icon_name("sidebar-show-symbolic")
+        self.sidebar_btn.add_css_class("flat")
+        self.sidebar_btn.set_active(True)
+        self.sidebar_btn.set_tooltip_text("Hide the HUD  (F9)")
+        self.sidebar_btn.connect("toggled", self._on_toggle_sidebar)
+        hb.pack_start(self.sidebar_btn)
 
         newchat = _icon_button("document-new-symbolic",
                                "New conversation  (Ctrl+N)")
@@ -589,7 +652,10 @@ class GeorgeWindow(Adw.ApplicationWindow):
         }
         for g in self.gauges.values():
             gauge_row.append(g)
-        vit_card.insert_child_after(gauge_row, vit_card.get_first_child())
+        # After the title AND its hairline, not between them.
+        anchor = vit_card.get_first_child()
+        nxt = anchor.get_next_sibling() if anchor is not None else None
+        vit_card.insert_child_after(gauge_row, nxt or anchor)
 
         self.spark_cpu = hud.Sparkline(accent, dim)
         spark_wrap = _box(spacing=2)
@@ -598,17 +664,19 @@ class GeorgeWindow(Adw.ApplicationWindow):
         vit_card.append(spark_wrap)
         col.append(vit_card)
 
-        # -- WEATHER
-        wx_card, self.weather_body = _card("WEATHER")
-        self.weather_body.append(_label("checking...", "dim"))
-        col.append(wx_card)
-
-        # -- ENGINE
+        # -- ENGINE.  Status before content: when something is wrong this
+        # is the card he needs, so it does not belong at the bottom of a
+        # scroll.
         models_btn = _icon_button("emblem-system-symbolic", "Manage models")
         models_btn.connect("clicked", lambda *_a: self._open_models())
         eng_card, self.engine_body = _card("ENGINE", models_btn)
         self.engine_body.append(_label("starting...", "dim"))
         col.append(eng_card)
+
+        # -- WEATHER
+        wx_card, self.weather_body = _card("WEATHER")
+        self.weather_body.append(_label("checking...", "dim"))
+        col.append(wx_card)
 
         # -- NEWS
         refresh = _icon_button("view-refresh-symbolic", "Refresh headlines")
@@ -676,7 +744,26 @@ class GeorgeWindow(Adw.ApplicationWindow):
         entry_scroll.set_max_content_height(190)
         entry_scroll.set_hexpand(True)
         entry_scroll.set_child(self.entry)
-        frame.append(entry_scroll)
+
+        # Gtk.TextView has no placeholder of its own, so it is an overlay
+        # label that hides itself the moment there is anything in the
+        # buffer.  Without it the composer is a blank slab with no hint
+        # about what George can actually be asked for.
+        self.placeholder = _label(
+            "Ask George anything - the news, this box, the weather, the web",
+            "placeholder", wrap=False, xalign=0.0)
+        self.placeholder.set_valign(Gtk.Align.START)
+        self.placeholder.set_halign(Gtk.Align.START)
+        self.placeholder.set_can_target(False)
+        self.placeholder.set_ellipsize(Pango.EllipsizeMode.END)
+        self.placeholder.set_margin_top(8)
+        overlay = Gtk.Overlay()
+        overlay.set_child(entry_scroll)
+        overlay.add_overlay(self.placeholder)
+        overlay.set_hexpand(True)
+        buf = self.entry.get_buffer()
+        buf.connect("changed", self._sync_placeholder)
+        frame.append(overlay)
 
         self.send_btn = Gtk.Button()
         self.send_btn.set_icon_name("go-up-symbolic")
@@ -693,6 +780,15 @@ class GeorgeWindow(Adw.ApplicationWindow):
 
         col.append(bar)
         return col
+
+    def _sync_placeholder(self, buf=None) -> None:
+        """Hide the composer hint as soon as there is anything to send."""
+        try:
+            buf = buf or self.entry.get_buffer()
+            empty = buf.get_char_count() == 0
+            self.placeholder.set_visible(empty)
+        except Exception:
+            pass
 
     # ---- empty state --------------------------------------------------
     def _show_hero(self) -> None:
@@ -756,9 +852,18 @@ class GeorgeWindow(Adw.ApplicationWindow):
     def _row(self, widget: Gtk.Widget, align: Gtk.Align) -> Gtk.Box:
         self._drop_hero()
         row = _box(horizontal=True)
+        # halign on a Gtk.Box child does nothing unless the child has spare
+        # space to align WITHIN, and a box only has spare space if it is
+        # told to fill the width.  Without this every bubble -- user and
+        # George alike -- silently piles up on the left.
+        row.set_hexpand(True)
+        # The child has to be the one that expands: a Gtk.Box hands spare
+        # width only to children that ask for it, and halign then places
+        # the widget inside that allocation.  Give it to the row instead
+        # and every bubble silently piles up on the left.
+        widget.set_hexpand(True)
         widget.set_halign(align)
         row.append(widget)
-        log("ui: _row appended widget css=%s" % (widget.get_css_classes()))
         self.transcript.append(row)
         self._trim_transcript()
         return row
@@ -766,10 +871,11 @@ class GeorgeWindow(Adw.ApplicationWindow):
     def add_user_bubble(self, text: str) -> None:
         box = _box(spacing=4)
         box.add_css_class("bubble-user")
-        log("ui: add_user_bubble css=%s text=%s" % (box.get_css_classes(), text[:40]))
-        box.set_size_request(120, -1)
         lbl = _label(text, "bubble-text", selectable=True)
-        lbl.set_max_width_chars(66)
+        # A short question should be a short bubble.  max_width_chars is
+        # the CAP on a wrapping label -- it does not pad a short one out.
+        lbl.set_max_width_chars(USER_BUBBLE_CHARS)
+        lbl.set_xalign(0.0)
         box.append(lbl)
         self._row(box, Gtk.Align.END)
 
@@ -1020,10 +1126,40 @@ class GeorgeWindow(Adw.ApplicationWindow):
     # =================================================================
     # HEADER ACTIONS
     # =================================================================
-    def _on_toggle_sidebar(self, _btn) -> None:
+    def _on_toggle_sidebar(self, btn=None) -> None:
+        """Show or hide the HUD, and keep the header button honest about it.
+
+        Called both from the button and from F9, so it reads the desired
+        state off the button rather than flipping blind -- otherwise the
+        keyboard shortcut and the button drift out of sync.
+        """
         child = self.paned.get_start_child()
-        if child:
-            child.set_visible(not child.get_visible())
+        if child is None:
+            return
+        if btn is None:
+            # F9: drive the button, which re-enters here with the new state.
+            self.sidebar_btn.set_active(not self.sidebar_btn.get_active())
+            return
+        show = bool(btn.get_active())
+        if not show and child.get_visible():
+            # Remember how wide he had dragged it so restoring is exact.
+            try:
+                pos = self.paned.get_position()
+                if pos > 80:
+                    self._sidebar_pos = pos
+            except Exception:
+                pass
+        child.set_visible(show)
+        if show:
+            try:
+                self.paned.set_position(getattr(self, "_sidebar_pos",
+                                                SIDEBAR_WIDTH))
+            except Exception:
+                pass
+        btn.set_icon_name("sidebar-show-symbolic" if show
+                          else "sidebar-hide-symbolic")
+        btn.set_tooltip_text(("Hide the HUD  (F9)" if show
+                              else "Show the HUD  (F9)"))
 
     def _on_new_chat(self, _btn) -> None:
         self._save_session()
@@ -1375,9 +1511,13 @@ class GeorgeWindow(Adw.ApplicationWindow):
         if not self.agent.history:
             return
         try:
-            first = next((m["content"] for m in self.agent.history
+            first = next((m["content"] for m in self.agent.conversation()
                           if m["role"] == "user"), "chat")
-            self.chats.save(self.session_id, first[:60], self.agent.history)
+            # Save the CONVERSATION, not the tool observations. The
+            # history dialog skips them on restore anyway, and they are
+            # most of the bytes in a long session.
+            self.chats.save(self.session_id, first[:60],
+                            self.agent.conversation())
             self.refresh_chats()
         except Exception as exc:
             log("session save failed: %s" % exc)
@@ -1833,6 +1973,9 @@ class GeorgeWindow(Adw.ApplicationWindow):
         grp.add(combo_for("ui_density", ["comfortable", "compact"], "Density"))
         row(grp, "Animate the HUD", "off saves a little power",
             switch_for("animations"))
+        row(grp, "Artwork behind the chat",
+            "the bundled George plate, washed right down so text stays "
+            "readable", switch_for("wallpaper"))
         row(grp, "Interface sounds",
             "short blips on send, reply and errors" if self.sfx.available
             else "no audio player found (pw-play, paplay or aplay)",

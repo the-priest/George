@@ -142,6 +142,26 @@ def _card(title: str, action: Optional[Gtk.Widget] = None,
     return outer, body
 
 
+def _icon_or(*names: str) -> str:
+    """First icon name the running theme actually has.
+
+    A missing icon name is not an error in GTK -- the button simply
+    renders empty, which is indistinguishable from the button being
+    gone. `sidebar-hide-symbolic` is not in Adwaita, and setting it made
+    the HUD toggle disappear from the header.
+    """
+    try:
+        display = Gdk.Display.get_default()
+        if display is not None:
+            theme = Gtk.IconTheme.get_for_display(display)
+            for n in names:
+                if theme.has_icon(n):
+                    return n
+    except Exception:
+        pass
+    return names[-1]
+
+
 def _kv_row(key: str, value: str) -> Gtk.Box:
     row = _box(horizontal=True, spacing=8)
     k = _label(key, "hud-key", wrap=False)
@@ -535,7 +555,9 @@ class GeorgeWindow(Adw.ApplicationWindow):
         # A toggle, not a plain button: the header should say whether the
         # HUD is up without him having to look at the window.
         self.sidebar_btn = Gtk.ToggleButton()
-        self.sidebar_btn.set_icon_name("sidebar-show-symbolic")
+        self.sidebar_btn.set_icon_name(_icon_or("sidebar-show-symbolic",
+                                                "view-list-symbolic",
+                                                "open-menu-symbolic"))
         self.sidebar_btn.add_css_class("flat")
         self.sidebar_btn.set_active(True)
         self.sidebar_btn.set_tooltip_text("Hide the HUD  (F9)")
@@ -1157,8 +1179,13 @@ class GeorgeWindow(Adw.ApplicationWindow):
                                                 SIDEBAR_WIDTH))
             except Exception:
                 pass
-        btn.set_icon_name("sidebar-show-symbolic" if show
-                          else "sidebar-hide-symbolic")
+        # "sidebar-hide-symbolic" DOES NOT EXIST in Adwaita -- setting
+        # it left the button blank, which is why the toggle vanished
+        # from the header. Only ever use an icon we have verified is
+        # there; the pressed state already communicates on/off.
+        btn.set_icon_name(_icon_or("sidebar-show-symbolic",
+                                   "view-list-symbolic",
+                                   "open-menu-symbolic"))
         btn.set_tooltip_text(("Hide the HUD  (F9)" if show
                               else "Show the HUD  (F9)"))
 
@@ -1242,20 +1269,52 @@ class GeorgeWindow(Adw.ApplicationWindow):
         save_config(self.cfg)
         self._set_state("idle" if self._engine_ok else "down")
 
-    def _pull_model(self, name: str) -> None:
+    def _pull_model(self, name: str, row: Any = None,
+                    btn: Any = None) -> None:
         """Pull from the Eyes page without making him find the Models
-        window."""
-        self.toast("pulling %s ..." % name)
+        window -- and SHOW that it is happening.
+
+        The progress callback used to be discarded and the only feedback
+        was a toast on the main window, hidden behind this modal dialog.
+        A multi-gigabyte download with no visible change is
+        indistinguishable from a broken button.
+        """
+        if btn is not None:
+            btn.set_sensitive(False)
+            btn.set_label("pulling...")
+        sub = row.get_subtitle() if row is not None else ""
+
+        def progress(status: Any, frac: Any) -> None:
+            # ModelManager.pull reports (status, 0..1) -- NOT bytes.
+            if row is None:
+                return
+            try:
+                pct = float(frac or 0.0) * 100.0
+            except (TypeError, ValueError):
+                pct = 0.0
+            label = str(status or "pulling").strip()[:40]
+            idle(row.set_subtitle,
+                 ("%s  %.0f%%" % (label, pct)) if pct > 0 else label)
 
         def work() -> None:
             try:
-                _ok, msg = self.models.pull(name, lambda m, f: None,
-                                            threading.Event())
+                ok, msg = self.models.pull(name, progress, threading.Event())
             except Exception as exc:
-                msg = "pull failed: %s" % exc
-            idle(self.toast, msg)
+                ok, msg = False, "pull failed: %s" % exc
+
+            def done() -> None:
+                if row is not None:
+                    row.set_subtitle(("installed - reopen this window to "
+                                      "select it") if ok else msg)
+                if btn is not None:
+                    btn.set_label("Pull" if not ok else "done")
+                    btn.set_sensitive(not ok)
+                self.toast(msg)
+            idle(done)
         threading.Thread(target=work, daemon=True,
                          name="george-pull").start()
+        if row is not None and not sub:
+            row.set_subtitle("starting...")
 
     def _sync_watcher(self) -> None:
         want = bool(self.cfg.get("watch_enabled"))
@@ -1967,7 +2026,14 @@ class GeorgeWindow(Adw.ApplicationWindow):
                 b = Gtk.Button(label="Pull")
                 b.add_css_class("chip")
                 b.set_valign(Gtk.Align.CENTER)
-                b.connect("clicked", lambda *_a, n=name: self._pull_model(n))
+                # Progress has to land ON THIS ROW. It used to go to a
+                # toast on the main window -- behind this modal dialog,
+                # where he could not see it -- and the progress callback
+                # was thrown away entirely, so a 1.7 GB download looked
+                # like a button that did nothing.
+                b.connect("clicked",
+                          lambda _w, n=name, row=r, btn=b:
+                          self._pull_model(n, row, btn))
                 r.add_suffix(b)
             grp.add(r)
         page.add(grp)

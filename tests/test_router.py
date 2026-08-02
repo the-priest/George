@@ -231,7 +231,8 @@ class CountingOllama:
     def resolve_model(self):
         return ("mock:1", "")
 
-    def chat_stream(self, messages, on_token, stop, on_stall=None, model=""):
+    def chat_stream(self, messages, on_token, stop, on_stall=None,
+                    model="", schema=None):
         self.calls += 1
         return self.replies.pop(0) if self.replies else ""
 

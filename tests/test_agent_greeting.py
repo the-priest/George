@@ -21,7 +21,8 @@ class MockOllama:
         return True
     def resolve_model(self):
         return ("mock:1", "")
-    def chat_stream(self, messages, on_token, stop, on_stall=None, model=""):
+    def chat_stream(self, messages, on_token, stop, on_stall=None,
+                    model="", schema=None):
         # return next reply in sequence
         if not self.replies:
             return ""

@@ -1,5 +1,88 @@
 # George changelog
 
+## 3.4.0 - constrained decoding: misbehaviour becomes unrepresentable
+
+Everything so far has tried to PERSUADE a 4B model to emit the protocol
+correctly - worked examples, blunt rules, a firewall to catch it when it
+fails anyway. Persuasion has a ceiling, and 3.3.0 was written because
+that ceiling had been hit.
+
+- **ollama accepts a JSON Schema in `format`, and masks the sampler
+  against it.** Only tokens that keep the output valid can be produced.
+  The model does not TRY to emit our protocol; it becomes incapable of
+  emitting anything else. There is no token path from a constrained
+  decode to "We are in a new conversation. The user says...". This is
+  the difference between asking a small model to behave and making
+  misbehaviour structurally impossible.
+- The schema pins the shape that matters - one object, a tool name from
+  the real registry (all 33 including `answer`), an args object - and
+  deliberately leaves `args` free-form. A schema strict enough for all
+  32 tools would be enormous, and would make an unlisted key impossible
+  rather than merely wrong.
+- On by default (`structured: auto`), switchable off, and it degrades:
+  an ollama too old for `format` gets a 400, and George drops the field
+  and retries once.
+- **THAT FALLBACK PATH WAS ALREADY BROKEN and nobody had noticed.** The
+  same handler covers the `think` field, and it retried, got a good
+  response, and then FELL THROUGH to raise anyway - `resp` was assigned
+  and immediately discarded. So on any ollama old enough to reject
+  `think`, George failed every request. Fixed by extracting the stream
+  consumer into `_consume` so the retry has something to return.
+- Newer ollama returns a reasoning model's scratchpad in a separate
+  `thinking` field. `_consume` now says explicitly that it is never
+  appended - concatenating it is another route to deliberation on
+  screen.
+- Six test mocks were pinning the old `chat_stream` signature and failed
+  when it grew a `schema` parameter. Signature drift in the tests, not a
+  regression - fixed the mocks.
+- **New `tests/test_structured.py`**: the schema covers every registered
+  tool, is sent when it should be, is not sent when off or absent, and
+  the old-ollama retry returns the response instead of raising.
+
+## 3.3.0 - the reply firewall, and two things I broke
+
+- **George printed the model's private scratchpad as the answer.** At a
+  plain "hi geroge how are you bro", qwen3:4b emitted eight hundred
+  words of itself deliberating - "I must respond as George", "let me
+  craft a response", "Final decision:" - and all of it went on screen.
+
+  The loop had exactly ONE fallback: no JSON found, so treat the whole
+  raw reply as prose and show it. That fallback is the bug. A 4B model
+  does not reliably obey "output only JSON", so the loop cannot assume
+  that anything which is not JSON is a reply.
+
+  New firewall in front of that path. It recognises a scratchpad by the
+  phrases that only appear when a model talks to ITSELF (two or more
+  needed, so ordinary prose containing one is not misread), then
+  salvages the answer it settled on - a deliberating model quotes its
+  candidates, and the last quoted line that reads like speech is almost
+  always the one it chose. On his actual leak it recovers exactly "Hey
+  bro. I'm running smoothly. What do you need?" out of 800 words. If
+  nothing is recoverable it asks once more for the JSON alone, and only
+  if THAT fails does he get a short honest line. Raw deliberation never
+  reaches the screen.
+
+- **I broke the HUD toggle in 3.0.0.** The stateful toggle swapped its
+  icon to `sidebar-hide-symbolic` when the sidebar was shown - and that
+  icon DOES NOT EXIST in Adwaita. A missing icon name is not an error in
+  GTK; the button just renders empty, which is indistinguishable from
+  the button being gone. New `_icon_or()` helper takes a list and
+  returns the first name the running theme actually has.
+
+- **Pulling a vision model looked like a dead button.** The progress
+  callback was discarded (`lambda m, f: None`) and the only feedback was
+  a toast on the main window - behind the modal Settings dialog, where
+  he could not see it. Progress now lands on the row itself, and the
+  callback signature is right: ModelManager.pull reports (status,
+  0..1), not bytes.
+
+- **New `tests/test_firewall.py`** - his real leak verbatim, three other
+  scratchpad shapes, six ordinary replies that must NOT be flagged
+  (including one that legitimately contains "the rules say" and one
+  that says "I think the simplest"), salvage refusing to return the
+  model quoting its own rules, and end to end: leak in, one clean
+  sentence out.
+
 ## 3.2.0 - room to think, and three tools that do a whole job
 
 - **num_ctx is 16384, up from 8192.** The system prompt is ~2.8k and a

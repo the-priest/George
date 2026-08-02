@@ -39,7 +39,7 @@ from george_platform import IS_WINDOWS
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "3.2.0"
+VERSION = "3.4.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = osx.config_dir()
@@ -85,6 +85,10 @@ DEFAULTS: Dict[str, Any] = {
     "stall_seconds": 90,             # no token for this long = say so
     "tool_timeout": 150,             # a wedged tool cannot wedge the turn
     "auto_model_fallback": True,     # configured model gone -> use one here
+    # Constrained decoding: ollama masks the sampler against a JSON
+    # Schema so invalid output is unrepresentable, not merely discouraged.
+    # auto = use it and fall back if the server is too old.
+    "structured": "auto",            # auto | off
     "thinking": "off",               # auto | off | on  (see chat_stream)
 
     "voice_enabled": True,
@@ -162,6 +166,7 @@ LIMITS: Dict[str, Tuple[float, float]] = {
 
 CHOICES: Dict[str, Tuple[str, ...]] = {
     "thinking": ("auto", "off", "on"),
+    "structured": ("auto", "off"),
     "voice_engine": ("auto", "piper", "espeak", "sapi", "none"),
     "persona": ("jarvis", "plain", "blunt"),
     "watch_mode": ("advice", "banter", "quiet"),
@@ -1142,7 +1147,8 @@ class Ollama:
                     on_token: Callable[[str], None],
                     stop: threading.Event,
                     on_stall: Optional[Callable[[float], None]] = None,
-                    model: str = "") -> str:
+                    model: str = "",
+                    schema: Optional[Dict[str, Any]] = None) -> str:
         """Stream a reply.  Returns the full text.  Honours the stop event
         between chunks so the UI stop button is never a lie."""
         payload = {
@@ -1164,20 +1170,45 @@ class Ollama:
             payload["think"] = False
         elif think == "on":
             payload["think"] = True
+
+        # CONSTRAINED DECODING.  ollama takes a JSON Schema in `format`
+        # and masks the sampler so only tokens that keep the output
+        # valid against it can be produced.  The model does not "try" to
+        # emit our protocol -- it becomes INCAPABLE of emitting anything
+        # else.  A 4B cannot be talked into perfect formatting, but it
+        # can be prevented from breaking it.
+        #
+        # This is what would have stopped the 800-word scratchpad at
+        # source rather than catching it afterwards: there is no token
+        # path from here to "We are in a new conversation."
+        if schema is not None and str(
+                self.cfg.get("structured", "auto")).lower() != "off":
+            payload["format"] = schema
         timeout = int(self.cfg.get("request_timeout", 300))
         stall_after = float(self.cfg.get("stall_seconds", 90))
-        chunks: List[str] = []
         try:
             resp = self._post("/api/chat", payload, timeout)
         except urllib.error.HTTPError as exc:
-            if exc.code == 400 and "think" in payload:
-                # an ollama too old to know the field: retry without it
-                log("this ollama rejects `think`; retrying without it")
-                payload.pop("think", None)
+            # A 400 can mean this ollama is too old for `think`, or too
+            # old for `format`. Drop the optional fields and retry once.
+            #
+            # BUG THIS ALSO FIXES: the old code retried, got a good
+            # response, and then FELL THROUGH to raise anyway -- so the
+            # compatibility path never actually worked. `resp` was
+            # assigned and immediately discarded.
+            if exc.code == 400 and ("think" in payload or "format" in payload):
+                dropped = [k for k in ("format", "think") if k in payload]
+                log("this ollama rejects %s; retrying without" % dropped)
+                for k in dropped:
+                    payload.pop(k, None)
                 try:
                     resp = self._post("/api/chat", payload, timeout)
                 except Exception as exc2:
-                    raise OllamaError("ollama request failed: %s" % exc2) from exc2
+                    raise OllamaError(
+                        "ollama request failed: %s" % exc2) from exc2
+                else:
+                    return self._consume(resp, on_token, stop, on_stall,
+                                         stall_after)
             body = ""
             try:
                 body = exc.read().decode("utf-8", "replace")[:400]
@@ -1199,6 +1230,17 @@ class Ollama:
             log_exc("ollama request failed: %s" % exc)
             raise OllamaError("ollama request failed: %s" % exc) from exc
 
+        return self._consume(resp, on_token, stop, on_stall, stall_after)
+
+    @staticmethod
+    def _consume(resp, on_token, stop, on_stall, stall_after):
+        """Drain the NDJSON stream into one string.
+
+        Extracted so the compatibility retry above can share it -- it
+        used to have no way to return a response it had successfully
+        fetched, and fell through to raise instead.
+        """
+        chunks: List[str] = []
         last_token = time.time()
         warned = False
         with resp:
@@ -1214,7 +1256,12 @@ class Ollama:
                     continue
                 if obj.get("error"):
                     raise OllamaError(str(obj["error"]))
-                piece = (obj.get("message") or {}).get("content", "")
+                msg = obj.get("message") or {}
+                piece = msg.get("content", "")
+                # Newer ollama returns a reasoning model's scratchpad in
+                # a SEPARATE `thinking` field. Never append it: it is not
+                # part of the reply, and concatenating it is one way the
+                # deliberation ends up on his screen.
                 if piece:
                     chunks.append(piece)
                     last_token = time.time()

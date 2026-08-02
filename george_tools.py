@@ -687,6 +687,124 @@ def tool_open_path(args: Dict[str, Any], ag: "Agent") -> str:
 
 
 # =====================================================================
+# THE PROTOCOL SCHEMA
+#
+# ollama accepts a JSON Schema in `format` and masks the sampler so that
+# only tokens keeping the output valid can be produced. The model does
+# not TRY to emit our protocol; it becomes incapable of emitting
+# anything else.
+#
+# This is the difference between asking a 4B to behave and making
+# misbehaviour unrepresentable. There is no token path from a
+# constrained decode to "We are in a new conversation. The user says..."
+#
+# `args` is deliberately a free-form object: every tool takes different
+# keys, and a schema strict enough to cover all 32 would be enormous and
+# would make an unlisted key impossible rather than merely wrong. The
+# shape that MATTERS -- one object, a known tool name, an args object --
+# is what gets pinned.
+# =====================================================================
+
+def tool_schema() -> Dict[str, Any]:
+    """JSON Schema for exactly one action object."""
+    return {
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string",
+                     "enum": sorted(list(TOOLS.keys()) + ["answer"])},
+            "args": {"type": "object"},
+        },
+        "required": ["tool", "args"],
+    }
+
+
+# =====================================================================
+# THE REPLY FIREWALL
+#
+# A small model does not reliably obey "output only JSON". qwen3:4b, at
+# a plain "hi", emitted eight hundred words of scratchpad -- "I must
+# respond as George", "let me think of a response", "Final decision:" --
+# and George printed ALL OF IT as the answer, because the loop had one
+# fallback: no JSON found, so treat the whole raw reply as prose and
+# show it.
+#
+# That fallback is the bug. The model's private working is not a reply
+# and must never reach him. What follows is a firewall: recognise a
+# scratchpad, try to salvage the answer the model actually settled on,
+# and if that fails, ask again for just the JSON rather than dumping the
+# monologue on screen.
+# =====================================================================
+
+# Phrases that only appear when a model is talking to ITSELF. Matched
+# case-insensitively, at least two needed, so ordinary prose that
+# happens to contain one of them is not misread as scratchpad.
+_SCRATCHPAD_TELLS = (
+    "the user says", "the user said", "the user is", "i must respond",
+    "i must not", "i should respond", "let me think", "let me check",
+    "let me craft", "i'll craft", "i can say", "i'll go with",
+    "final decision", "final answer", "but wait", "however, the rule",
+    "the rules say", "the rule says", "according to the rules",
+    "so i can say", "alternatively:", "i think the simplest",
+    "let's output", "let me output", "i'll respond", "i need to output",
+    "worked example", "my response should", "okay, so", "first, i",
+    "the instructions say", "as george", "i am george, the",
+)
+
+# A line the model wrapped in quotes while deciding -- usually the
+# candidate answer it settled on.
+_QUOTED = re.compile(r'"([^"\n]{8,300})"')
+
+
+def looks_like_scratchpad(text: str) -> bool:
+    """True when this is the model thinking out loud, not a reply."""
+    t = str(text or "").lower()
+    if not t.strip():
+        return False
+    hits = sum(1 for tell in _SCRATCHPAD_TELLS if tell in t)
+    if hits >= 2:
+        return True
+    # A single tell plus obvious protocol talk is enough.
+    if hits >= 1 and ('"tool"' in t or "json object" in t
+                      or "args" in t and "text" in t):
+        return True
+    return False
+
+
+def salvage_answer(text: str) -> str:
+    """Pull the reply out of a scratchpad, if one is recoverable.
+
+    A deliberating model usually quotes its candidate answers. The LAST
+    quoted line that reads like something a person would say is almost
+    always the one it settled on -- that is exactly what happened in the
+    "hi geroge how are you bro" case, where it quoted
+    "Hey. I'm running smoothly. What do you need?" five times and then
+    printed its whole deliberation instead.
+
+    Returns "" when nothing sane can be recovered.
+    """
+    raw = str(text or "")
+    best = ""
+    for cand in _QUOTED.findall(raw):
+        c = cand.strip()
+        if not c or len(c) > 300:
+            continue
+        low = c.lower()
+        # skip the model quoting the RULES back at itself
+        if any(tell in low for tell in _SCRATCHPAD_TELLS):
+            continue
+        if low.startswith(("tool", "answer", "args", "text", "{")):
+            continue
+        if any(bad in low for bad in ("certainly!", "i'd be happy",
+                                      "great question")):
+            continue
+        # must look like speech: ends in sentence punctuation
+        if not c.endswith((".", "!", "?")):
+            continue
+        best = c
+    return best
+
+
+# =====================================================================
 # COMPOSITE TOOLS
 #
 # Each of these collapses a sequence the model would otherwise have to
@@ -1070,6 +1188,8 @@ class Agent:
         self.ollama = Ollama(cfg)
         self.history: List[Dict[str, str]] = []
         self._prompt_cache: Optional[str] = None
+        # Built once: it only changes if the tool registry changes.
+        self._schema: Optional[Dict[str, Any]] = tool_schema()
         self.stop_event = threading.Event()
         self.busy = False
         self.confirm_elapsed = 0.0
@@ -1338,7 +1458,8 @@ class Agent:
                 log("agent: calling chat_stream with %d history items" % len(self.history))
                 reply = self.ollama.chat_stream(self.messages(), self.on_token,
                                                 self.stop_event,
-                                                on_stall=stalled, model=model)
+                                                on_stall=stalled, model=model,
+                                                schema=self._schema)
                 log("agent: chat_stream returned %d chars" % len(reply))
                 if self.stop_event.is_set():
                     self.on_step("stopped")
@@ -1354,6 +1475,29 @@ class Agent:
 
                 if not actions:
                     prose = strip_action_json(reply)
+
+                    # THE FIREWALL. A model that produced no JSON has
+                    # either answered in plain prose (fine) or spilled
+                    # its scratchpad (never fine). Printing the second
+                    # one is how "hi" came back as eight hundred words
+                    # of the model arguing with itself.
+                    if looks_like_scratchpad(prose):
+                        log("agent: scratchpad detected (%d chars), "
+                            "salvaging" % len(prose))
+                        salvaged = salvage_answer(prose)
+                        if salvaged:
+                            log("agent: salvaged %r" % salvaged[:60])
+                            prose = salvaged
+                        else:
+                            retry = self._ask_for_json_only(model)
+                            if retry:
+                                prose = retry
+                            else:
+                                prose = ("I got tangled up there - ask me "
+                                         "again?")
+                                log("agent: scratchpad unsalvageable")
+
+                    prose = prose.strip()
                     log("agent: final prose -> %s" % (prose or "(no reply)"))
                     self.on_final(prose or "(no reply)")
                     self.tts.speak(prose)
@@ -1447,6 +1591,38 @@ class Agent:
         """
         s = re.sub(r"[\s.!,]+$", "", str(text or "").strip().lower())
         return s in Agent._CANNED
+
+    def _ask_for_json_only(self, model: str) -> str:
+        """One more attempt, with the protocol restated as bluntly as it
+        can be. Returns "" if that fails too."""
+        try:
+            msgs = list(self.messages())
+            msgs.append({
+                "role": "user",
+                "content": ('You replied with your own reasoning instead of '
+                            'an answer. Output ONE line: '
+                            '{"tool": "answer", "args": {"text": "<your '
+                            'reply to him>"}} and absolutely nothing else. '
+                            'No thinking, no explanation, no preamble.'),
+            })
+            # Constrained here on purpose: this retry exists precisely
+            # because the model produced free prose when it should not
+            # have.
+            again = self.ollama.chat_stream(msgs, lambda _t: None,
+                                            self.stop_event, model=model,
+                                            schema=self._schema)
+            again = strip_reasoning(again or "")
+            for act in extract_actions(again):
+                if act[0] == "answer":
+                    txt = str(act[1].get("text", "")).strip()
+                    if txt and not looks_like_scratchpad(txt):
+                        return txt
+            plain = strip_action_json(again).strip()
+            if plain and not looks_like_scratchpad(plain) and len(plain) < 600:
+                return plain
+        except Exception as exc:
+            log("agent: json-only retry failed: %s" % exc)
+        return ""
 
     def _repair_final(self, final_text: str, observations: List[str],
                       recent_observations: List[str], model: str,

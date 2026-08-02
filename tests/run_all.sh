@@ -50,6 +50,12 @@ python3 tests/test_router.py || fail=1
 echo "== system prompt =="
 python3 tests/test_prompt.py || fail=1
 
+echo "== reply firewall (no scratchpad on screen) =="
+python3 tests/test_firewall.py || fail=1
+
+echo "== constrained decoding =="
+python3 tests/test_structured.py || fail=1
+
 echo "== design lint (contrast, type scale, sheet) =="
 python3 tests/test_design.py || fail=1
 

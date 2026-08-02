@@ -1,5 +1,49 @@
 # George changelog
 
+## 3.2.0 - room to think, and three tools that do a whole job
+
+- **num_ctx is 16384, up from 8192.** The system prompt is ~2.8k and a
+  multi-tool turn spends ~1.5k per observation, so 8192 left room for
+  three observations before George started forgetting the start of his
+  own turn. 16384 buys nine. Cost is ~1.2 GB more KV cache (fp16,
+  qwen3:4b) and proportionally more prefill on CPU. Deliberately NOT
+  32768: that is ~4.8 GB of cache and roughly double the wait before the
+  first token, to buy headroom a desktop assistant turn does not use.
+  Also fixed a stale `num_ctx` fallback of 8192 in the request builder
+  that would have drifted from DEFAULTS.
+
+- **Three composite tools.** Each collapses a sequence the model
+  otherwise had to plan, execute and stitch together itself. A round
+  trip saved is a whole prompt re-read plus a whole generation, and on
+  CPU that is seconds.
+
+  - `diagnose` - vitals, disks and top processes by CPU and memory in
+    one call, WITH the verdict already worked out. The model used to
+    call three tools and then judge which number was the anomaly; that
+    judgement is arithmetic, so it happens in Python now and the model
+    is handed the conclusion. "Why is it slow" routes straight here.
+  - `research` - search AND read the top result in one call. A snippet
+    is rarely enough to answer from, so the model used to search, judge,
+    open_page, then answer: three round trips.
+  - `pkg` - packages in the right dialect for this machine, without the
+    model knowing pacman from apt. This is a SAFETY tool as much as a
+    convenience: `pacman -Sy foo` is a partial upgrade and breaks Arch,
+    and rather than trust a 4B model to remember that under pressure the
+    correct command is built in Python from the detected manager. It
+    cannot emit a bare `-S` or a partial upgrade, and the test pins
+    that.
+
+- **BUG CAUGHT IN MY OWN NEW CODE, before it shipped:** the router
+  matched "install ripgrep" and prefetched `pkg` with action=install -
+  a state-changing action fired BEFORE the model had decided anything.
+  The router runs unreviewed by definition, so it must never take an
+  action that changes the machine. It now prefetches a SEARCH; the model
+  proposes the install and he confirms it, which is the path every state
+  change has to take. `tests/test_router.py` now asserts this across
+  every rule, not just the pkg one.
+
+- 13 router rules, ~11 microseconds per message. 32 tools.
+
 ## 3.1.0 - a prompt the model can actually follow
 
 The prompt had grown by accretion. Every fix across a dozen versions

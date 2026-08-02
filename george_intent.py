@@ -196,6 +196,18 @@ _RULES: List[Tuple[str, "re.Pattern", Any]] = [
                    "him what is full and what is worth clearing.")),
 
     # ---- what is eating the box --------------------------------------
+    ("diagnose", re.compile(
+        r"\b((whats|what is) wrong with (the|my) (box|machine|laptop)|"
+        r"why (is|s) (it|the box|my box|this thing) (so )?(slow|sluggish|"
+        r"laggy|crawling)|"
+        r"(full|health) check|check (the|my) (box|machine|system)|"
+        r"is everything (ok|alright|fine)|diagnose)\b"),
+     lambda m, n: ([("diagnose", {})],
+                   "A full health check is in the observation above, "
+                   "with the verdict already worked out from the "
+                   "numbers. Give him the verdict and the one thing "
+                   "responsible. Do not call system, disk or processes.")),
+
     ("processes", re.compile(
         r"\b((what(s| is)? (eating|using|hogging|chewing)"
         r"( up)?( the| my)? (cpu|ram|memory|box|machine))|"
@@ -207,6 +219,25 @@ _RULES: List[Tuple[str, "re.Pattern", Any]] = [
                    "Vitals and the heaviest processes are in the "
                    "observations above. Name the actual culprit and what "
                    "he can do about it.")),
+
+    # ---- packages: one call, right dialect, no partial-upgrade risk ---
+    ("pkg", re.compile(
+        r"\b(is (?P<p1>[\w.+-]{2,40}) installed|"
+        r"do i have (?P<p2>[\w.+-]{2,40}) installed|"
+        r"(install|search for|look for) (the )?(package )?(?P<p3>[\w.+-]{2,40}))\b"),
+     lambda m, n: ([("pkg", {
+         # READ-ONLY ONLY. The router runs this BEFORE the model has
+         # decided anything, so it must never take an action that
+         # changes the machine. "install ripgrep" prefetches a SEARCH;
+         # the model then proposes the install and he confirms it, which
+         # is the path every state change has to take.
+         "action": "installed" if "installed" in n else "search",
+         "package": (m.group("p1") or m.group("p2") or m.group("p3") or "")})],
+                   "The package manager result is in the observation "
+                   "above, run in the correct dialect for this machine. "
+                   "Answer from it. If he wants it installed and it is "
+                   "not there yet, say what the install command would be "
+                   "and let him confirm.")),
 
     # ---- network -----------------------------------------------------
     ("network", re.compile(

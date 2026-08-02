@@ -24,7 +24,8 @@ from george_core import (
     APP_NAME, DEFAULT_FEEDS, HOME, POWER_ACTIONS, MemoryStore, NOTES_PATH,
     machine_summary,
     Ollama, OllamaError, _ensure_dirs, clipboard_read, clipboard_write,
-    disk_report, fetch_news_detailed, find_files, html_to_text, http_get,
+    detect_pkg_mgr, disk_report, fetch_news_detailed, find_files,
+    html_to_text, http_get,
     inside_sandbox, is_destructive_command, is_network_pipe_to_shell,
     command_needs_confirmation, launch_app, list_processes, log,
     media_control, network_status, notify, open_in_browser, open_path,
@@ -48,6 +49,25 @@ from george_voice import TextToSpeech
 # under a heading that matches his words, it picks by intent. Each line
 # is name, args, then when to reach for it.
 TOOL_SPEC = """\
+--- ONE CALL THAT DOES A WHOLE JOB (prefer these) ---
+diagnose     {}                             FULL health check of the box in one
+                                            go - vitals, disks, top processes,
+                                            AND the verdict already worked out.
+                                            Use for "why is it slow", "is
+                                            everything ok". Do not then call
+                                            system/disk/processes as well.
+research     {"query": str, "read": int}    search the web AND read the top
+                                            result(s) in one call. Use instead
+                                            of web_search when you need a real
+                                            answer, not just links.
+pkg          {"action": "search"|"info"|"installed"|"owns"|"install"|"update",
+              "package": str}               packages, in the right dialect for
+                                            THIS machine. You do not need to
+                                            know pacman from apt - just say
+                                            what you want. Safer than `run`:
+                                            it can never emit a partial
+                                            upgrade.
+
 --- LOOKING THINGS UP (the world) ---
 web_search   {"query": str, "count": int}   search the web for anything current
 open_page    {"url": str}                   fetch a page and READ it to yourself
@@ -665,7 +685,207 @@ def tool_open_path(args: Dict[str, Any], ag: "Agent") -> str:
     return res
 
 
+
+# =====================================================================
+# COMPOSITE TOOLS
+#
+# Each of these collapses a sequence the model would otherwise have to
+# plan, execute and stitch together itself -- three or four round trips
+# of picking a tool, reading an observation, picking the next one. They
+# do the whole job in one call and hand back a result that is already
+# ordered and, where it matters, already ANALYSED. The model's remaining
+# work is to say it in a sentence.
+#
+# This is the cheapest speedup available: a round trip saved is a whole
+# prompt re-read and a whole generation, and on CPU that is seconds.
+# =====================================================================
+
+_PKG_VERBS = ("search", "info", "install", "installed", "owns", "update")
+
+
+def tool_pkg(args: Dict[str, Any], ag: "Agent") -> str:
+    """Package management WITHOUT the model knowing the dialect.
+
+    Getting this wrong is one of the easiest ways for a local assistant
+    to be actively harmful -- `pacman -Sy foo` on Arch is a partial
+    upgrade and breaks the system. Rather than trust a 4B model to
+    remember that under pressure, the correct command is BUILT HERE from
+    the detected package manager, and the model just says what it wants.
+    """
+    verb = str(args.get("action", args.get("verb", "search"))).strip().lower()
+    pkg = str(args.get("package", args.get("name", ""))).strip()
+    if verb not in _PKG_VERBS:
+        return ("unknown package action %r. Use one of: %s"
+                % (verb, ", ".join(_PKG_VERBS)))
+    mgr = detect_pkg_mgr()
+    if not mgr:
+        return "no package manager found on this machine"
+    if verb != "update" and not pkg:
+        return "no package name given for %s" % verb
+
+    # (command, is_read_only) per manager per verb. Read-only forms run
+    # immediately; anything that changes the box goes through the normal
+    # confirmation gate in run_shell's caller.
+    table = {
+        "pacman": {
+            "search": ("pacman -Ss %s" % pkg, True),
+            "info": ("pacman -Si %s" % pkg, True),
+            "installed": ("pacman -Q %s" % pkg, True),
+            "owns": ("pacman -Qo %s" % pkg, True),
+            "install": ("pacman -Syu %s" % pkg, False),
+            "update": ("pacman -Syu", False),
+        },
+        "apt-get": {
+            "search": ("apt-cache search %s" % pkg, True),
+            "info": ("apt-cache show %s" % pkg, True),
+            "installed": ("dpkg -s %s" % pkg, True),
+            "owns": ("dpkg -S %s" % pkg, True),
+            "install": ("apt-get install %s" % pkg, False),
+            "update": ("apt-get update && apt-get upgrade", False),
+        },
+        "dnf": {
+            "search": ("dnf search %s" % pkg, True),
+            "info": ("dnf info %s" % pkg, True),
+            "installed": ("rpm -q %s" % pkg, True),
+            "owns": ("rpm -qf %s" % pkg, True),
+            "install": ("dnf install %s" % pkg, False),
+            "update": ("dnf upgrade", False),
+        },
+        "zypper": {
+            "search": ("zypper search %s" % pkg, True),
+            "info": ("zypper info %s" % pkg, True),
+            "installed": ("rpm -q %s" % pkg, True),
+            "owns": ("rpm -qf %s" % pkg, True),
+            "install": ("zypper install %s" % pkg, False),
+            "update": ("zypper update", False),
+        },
+        "apk": {
+            "search": ("apk search %s" % pkg, True),
+            "info": ("apk info %s" % pkg, True),
+            "installed": ("apk info -e %s" % pkg, True),
+            "owns": ("apk info --who-owns %s" % pkg, True),
+            "install": ("apk add %s" % pkg, False),
+            "update": ("apk upgrade", False),
+        },
+        "winget": {
+            "search": ("winget search %s" % pkg, True),
+            "info": ("winget show %s" % pkg, True),
+            "installed": ("winget list %s" % pkg, True),
+            "owns": ("winget list %s" % pkg, True),
+            "install": ("winget install --id %s -e" % pkg, False),
+            "update": ("winget upgrade --all", False),
+        },
+    }
+    plan = table.get(mgr, {}).get(verb)
+    if not plan:
+        return "%s cannot do %s here" % (mgr, verb)
+    command, _read_only = plan
+    ag.step("%s: %s" % (mgr, verb))
+    out = tool_run({"command": command}, ag)
+    note = ""
+    if mgr == "pacman" and verb == "search":
+        note = ("\nNOTE: pacman searches the official repos only. If it is "
+                "not here it may be in the AUR - that needs `paru -S` or "
+                "`yay -S`, which pacman cannot do.")
+    return "Ran: %s\n%s%s" % (command, out, note)
+
+
+def tool_diagnose(args: Dict[str, Any], ag: "Agent") -> str:
+    """Everything needed to answer "why is this box slow", pre-analysed.
+
+    The model used to have to call system, then disk, then processes,
+    then work out which number was the anomaly -- four round trips and a
+    judgement it is not good at. The judgement is arithmetic, so it
+    happens here and the verdict is handed over already made.
+    """
+    ag.step("running a full check")
+    parts = []
+    verdicts = []
+    try:
+        st = system_status()
+    except Exception as exc:
+        st = {}
+        parts.append("system status failed: %s" % exc)
+
+    def _num(key):
+        try:
+            return float(str(st.get(key, "")).strip().rstrip("%"))
+        except (TypeError, ValueError):
+            return None
+
+    cpu, mem, disk = _num("cpu_pct"), _num("mem_pct"), _num("disk_pct")
+    if cpu is not None and cpu >= 85:
+        verdicts.append("CPU is pinned at %.0f%%" % cpu)
+    if mem is not None and mem >= 90:
+        verdicts.append("memory is nearly full at %.0f%%" % mem)
+    if disk is not None and disk >= 90:
+        verdicts.append("the disk is %.0f%% full" % disk)
+    swap = str(st.get("swap", ""))
+    parts.append("VITALS: cpu %s%%, memory %s, disk %s, swap %s, up %s"
+                 % (st.get("cpu_pct", "?"), st.get("memory", "?"),
+                    st.get("disk", "?"), swap or "?", st.get("uptime", "?")))
+    try:
+        parts.append("DISKS:\n" + disk_report())
+    except Exception as exc:
+        parts.append("disk report failed: %s" % exc)
+    for sort_by in ("cpu", "memory"):
+        try:
+            parts.append("TOP BY %s:\n%s"
+                         % (sort_by.upper(), list_processes(sort_by, 6)))
+        except Exception as exc:
+            parts.append("process list (%s) failed: %s" % (sort_by, exc))
+
+    if not verdicts:
+        verdicts.append("nothing is actually out of range - the numbers "
+                        "are all normal")
+    ag.tool_card("diagnose", "full check", "ok")
+    return ("VERDICT: %s.\n\n%s\n\nThe verdict above is already worked "
+            "out from these numbers. Tell him the verdict and the one "
+            "process or filesystem responsible. Do not re-run system, "
+            "disk or processes."
+            % ("; ".join(verdicts), "\n\n".join(parts)))
+
+
+def tool_research(args: Dict[str, Any], ag: "Agent") -> str:
+    """Search, then actually READ the best result.
+
+    A search snippet is rarely enough to answer with, so the model would
+    search, judge, open_page, then answer: three round trips. This does
+    the search and fetches the top result's text in one call.
+    """
+    q = str(args.get("query", args.get("topic", ""))).strip()
+    if not q:
+        return "no query given"
+    ag.step("researching: %s" % q)
+    try:
+        results = web_search(q, 6)
+    except Exception as exc:
+        return "search failed: %s" % exc
+    if not results:
+        return ("no search results for %r. Say so - do not answer from "
+                "memory as if you had looked it up." % q)
+    out = ["SEARCH RESULTS:\n" + _fmt_results(results)]
+    depth = max(1, min(int(args.get("read") or 1), 3))
+    for r in results[:depth]:
+        url = r.get("url", "")
+        if not url:
+            continue
+        try:
+            text = html_to_text(http_get(url, timeout=20))[:4000]
+        except Exception as exc:
+            out.append("COULD NOT READ %s: %s" % (url, exc))
+            continue
+        out.append("FULL TEXT OF %s:\n%s" % (url, text))
+    ag.tool_card("research", q, "%d results" % len(results))
+    return ("\n\n".join(out) + "\n\nAnswer from the text above and name "
+            "the source. If it does not actually answer him, say so "
+            "rather than filling the gap from memory.")
+
+
 TOOLS: Dict[str, Callable[[Dict[str, Any], "Agent"], str]] = {
+    "pkg": tool_pkg,
+    "diagnose": tool_diagnose,
+    "research": tool_research,
     "web_search": tool_web_search,
     "open_page": tool_open_page,
     "news": tool_news,

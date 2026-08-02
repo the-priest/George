@@ -64,7 +64,13 @@ EXPECT = {
     "disk space": ["disk"],
     "am i running out of space": ["disk"],
     "what's eating the cpu": ["system", "processes"],
-    "why is my box so slow": ["system", "processes"],
+    # slowness now gets the pre-analysed verdict, not two raw dumps the
+    # model has to compare itself
+    "why is my box so slow": ["diagnose"],
+    "whats wrong with my box": ["diagnose"],
+    "is everything ok": ["diagnose"],
+    "is ripgrep installed": ["pkg"],
+    "install ripgrep": ["pkg"],
     "am i online": ["network"],
     "what's my ip": ["network"],
     "what's on the news": ["news"],
@@ -120,6 +126,72 @@ for text in MUST_NOT:
 # -- polite requests for the thing NOW still route ---------------------
 for text in ("can you tell me the weather", "could you check the news"):
     check(tools_of(text), "%r is a real request and should route" % text)
+
+# -- THE ROUTER MUST NEVER PREFETCH A STATE CHANGE ---------------------
+# It runs BEFORE the model has decided anything, so anything it fires is
+# unreviewed. "install ripgrep" must prefetch a SEARCH; the model then
+# proposes the install and he confirms it, which is the path every state
+# change has to take.
+_MUTATING = {"install", "update", "remove", "upgrade", "delete"}
+probe = ["install ripgrep", "install the package neovim", "search for htop",
+         "is ripgrep installed", "do i have curl installed",
+         "update everything", "remove firefox", "install docker"]
+for text in probe:
+    p = R.route(text)
+    if p is None:
+        continue
+    for tool, a in p.prefetch:
+        act = str(a.get("action", "")).lower()
+        check(act not in _MUTATING,
+              "%r prefetches a state-changing %s action %r"
+              % (text, tool, act))
+        check(tool not in ("run", "write_file", "power", "launch",
+                           "open_path", "forget", "remember", "note"),
+              "%r prefetches %s, which can change the machine"
+              % (text, tool))
+
+# every rule in the table, checked the same way
+for name, _pat, _b in R._RULES:
+    pass
+for text in list(EXPECT) + probe:
+    p = R.route(text)
+    if p is None:
+        continue
+    for tool, _a in p.prefetch:
+        check(tool in ("weather", "system", "disk", "processes", "network",
+                       "news", "show", "web_search", "recall", "pkg",
+                       "diagnose", "research"),
+              "%r prefetches an unexpected tool: %s" % (text, tool))
+
+# -- composite tools must be registered and documented -----------------
+for t in ("pkg", "diagnose", "research"):
+    check(t in gt.TOOLS, "composite tool %s is not registered" % t)
+
+# -- pkg must never emit a partial upgrade -----------------------------
+class _A:
+    cfg = dict(gc.DEFAULTS)
+
+    def step(self, *a):
+        pass
+
+    def tool_card(self, *a):
+        pass
+
+
+seen_cmds = []
+_real_run = gt.tool_run
+gt.tool_run = lambda args, ag: seen_cmds.append(args["command"]) or "exit=0"
+try:
+    for verb in ("search", "info", "installed", "install", "update"):
+        gt.tool_pkg({"action": verb, "package": "ripgrep"}, _A())
+finally:
+    gt.tool_run = _real_run
+for c in seen_cmds:
+    check("pacman -Sy " not in c + " ",
+          "pkg emitted a partial upgrade: %r" % c)
+    check(not (c.startswith("pacman -S ") and "-Syu" not in c),
+          "pkg emitted a bare pacman -S: %r" % c)
+check(seen_cmds, "pkg ran no commands at all")
 
 # -- the router must be able to be turned off --------------------------
 check(R.route("what's the weather", enabled=False) is None,

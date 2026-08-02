@@ -39,7 +39,7 @@ from george_platform import IS_WINDOWS
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "3.1.0"
+VERSION = "3.2.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = osx.config_dir()
@@ -70,7 +70,15 @@ DEFAULTS: Dict[str, Any] = {
     # between a reply and a wait.
     "model": "qwen3:4b",
     "temperature": 0.6,
-    "num_ctx": 8192,
+    # 16384, not 8192. The system prompt is ~2.5k, and a multi-tool turn
+    # like "brief me" spends ~1.5k per observation: at 8192 that left room
+    # for three before George started forgetting the start of his own
+    # turn. 16384 buys nine. The cost is ~1.2 GB more KV cache (fp16,
+    # qwen3:4b) and proportionally more prefill time on CPU -- fine on a
+    # 16 GB laptop, which is why this is not 32768. That would be ~4.8 GB
+    # of cache and double the wait before the first token appears, to buy
+    # headroom a desktop assistant turn does not use.
+    "num_ctx": 16384,
     "keep_alive": "30m",
     "max_steps": 14,
     "request_timeout": 300,
@@ -1144,7 +1152,7 @@ class Ollama:
             "keep_alive": self.cfg.get("keep_alive", "30m"),
             "options": {
                 "temperature": float(self.cfg.get("temperature", 0.6)),
-                "num_ctx": int(self.cfg.get("num_ctx", 8192)),
+                "num_ctx": int(self.cfg.get("num_ctx", DEFAULTS["num_ctx"])),
             },
         }
         # Reasoning models auto-think on every request, and George's loop

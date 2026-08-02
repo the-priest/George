@@ -113,6 +113,10 @@ DEFAULTS: Dict[str, Any] = {
     "location": "",                  # blank = wttr.in geo-IP guess
     "browser": "",                   # blank = xdg-open
     "user_name": "",
+    # Tunables for agent behaviour
+    "short_final_len": 20,               # <= this length considered 'short' for replacement
+    "dedupe_repeat_threshold": 2,        # how many times the same tool+args may run before dedupe
+    "final_replacement_enabled": True,
 }
 
 # Anything numeric gets clamped to these on load, so a hand-edited or

@@ -892,13 +892,15 @@ class Agent:
 
                     sig = tool + json.dumps(args, sort_keys=True)[:200]
                     log("agent: tool call candidate %s args=%s" % (tool, json.dumps(args, sort_keys=True)))
-                    if last_calls.count(sig) >= 2:
-                        # Avoid telling the user in the transcript that the
-                        # model duplicated itself; add a terse observation
-                        # instead so the assistant can proceed without
-                        # producing a canned confirmation phrase.
+                    try:
+                        dedupe_threshold = int(self.cfg.get("dedupe_repeat_threshold", 2) or 2)
+                    except (TypeError, ValueError):
+                        dedupe_threshold = 2
+                    if last_calls.count(sig) >= dedupe_threshold:
+                        # Add a terse observation; do not let the model
+                        # produce a canned confirmation in the transcript.
                         observations.append("OBSERVATION (%s): (duplicate call ignored)" % tool)
-                        log("agent: dedupe skipped tool %s" % tool)
+                        log("agent: dedupe skipped tool %s (threshold=%d)" % (tool, dedupe_threshold))
                         continue
                     last_calls.append(sig)
 
@@ -915,7 +917,13 @@ class Agent:
                     # confirmation (e.g. "Done."), replace it with a more
                     # informative summary drawn from the last observation so
                     # the user hears something meaningful.
-                    if final_text.strip().lower() in ("done", "done.", "ok", "ok.", "already on screen", "already on screen."):
+                    try:
+                        short_final_len = int(self.cfg.get("short_final_len", 20) or 20)
+                    except (TypeError, ValueError):
+                        short_final_len = 20
+                    canned = ("done", "done.", "ok", "ok.", "already on screen", "already on screen.")
+                    is_short = len(final_text.strip()) <= short_final_len
+                    if (final_text.strip().lower() in canned or is_short) and self.cfg.get("final_replacement_enabled", True):
                         # prefer recent observations from prior steps if present
                         source_obs = observations or recent_observations
                         if source_obs:

@@ -1,5 +1,70 @@
 # George changelog
 
+## 4.0.0 - roadmap 2.5: stop asking the network twice
+
+Version renamed at his request. 3.10.0 was correct semver - the minor is
+an integer, so 3.10 follows 3.9 the way Python 3.10 follows 3.9 - but
+after ten releases of this the work has earned a round number.
+
+- **Short-lived results cache** for weather, news and search. Asking the
+  weather twice in a minute hit wttr.in twice; asking for the news and
+  then a follow-up about one of the headlines re-fetched every feed. On
+  a laptop that is seconds of waiting for an answer George already had.
+  Four identical weather asks now make ONE network call.
+- **The shortness of the TTL is the whole design**: long enough that a
+  follow-up is instant, short enough that "what's the weather now" is
+  never answered from ten minutes ago. Per-kind, because different data
+  ages differently - weather 300s (he asks because he is about to walk
+  outside), news 420s, search and pages 900s. The test asserts the
+  ceiling AND that weather expires no slower than news.
+- **A failed lookup is never cached.** Caching an empty news result
+  would keep telling him the feeds are down for seven minutes after they
+  came back.
+- Bounded at 120 entries - this lives for the life of the process - and
+  it fails open: a broken cache returns a miss rather than raising.
+  Switchable with the `cache` config key.
+- `test_no_false_claims` failed on this and was right to: it feeds
+  tool_news a different result each scenario while asking the same
+  question, which real use never does, so scenario two was being
+  answered from scenario one's cache. Fixed with a cache_clear between
+  scenarios rather than by weakening the cache.
+- **New `tests/test_cache.py`** - the primitives, real expiry with a
+  1-second probe TTL, the TTL ceilings, boundedness under 300 inserts,
+  different-location and different-topic misses, the do-not-cache-
+  failures rule, and the off switch.
+
+## 3.10.0 - roadmap 2.3: repair the arguments, do not retry the turn
+
+Constrained decoding pins the OUTER shape of a tool call and
+deliberately leaves `args` free-form, because a schema strict enough for
+33 tools would make an unlisted key impossible rather than merely wrong.
+So the inside still needed help, and it was getting none: a wrong key
+failed the call and the model retried from scratch - a whole round trip
+on CPU to fix a typo.
+
+- **Deterministic repair, no extra model call.** A 4B reaches for the
+  obvious synonym: `link` for `url`, `q` for `query`, `cmd` for
+  `command`, `file` for `path`, `code` for `source`. 29 tools now carry
+  an alias table, and a rename is a dict lookup rather than seconds of
+  inference.
+- **Shape problems too**: a bare string where a dict belongs is lifted
+  into the tool's required key (`{"tool":"show","args":"http://x"}`
+  works), a nested `args`/`parameters`/`input` wrapper is unwrapped, and
+  if the required key is missing but exactly ONE unrecognised value is
+  present, that is what it meant.
+- **It never invents anything.** With no candidate it changes nothing;
+  with two candidates it refuses to guess; a correct call is left byte
+  for byte alone; and an alias never overwrites a key that was already
+  right. All four are tested, and the "refuses to guess" rule was
+  verified by loosening it and watching the test fail.
+- **When repair is impossible, the complaint is actionable**: it names
+  the missing key, lists what was actually sent, says which synonyms it
+  already tried, and shows the exact call shape. The model retries
+  informed instead of guessing again.
+- **New `tests/test_arg_repair.py`** - 21 real synonym cases, five shape
+  cases, four must-not-invent cases, a consistency check that every
+  alias points at a real tool, and end to end through `call_tool`.
+
 ## 3.9.0 - roadmap 1.3: whole sessions, replayed
 
 Every other test checks a part. This one plays complete turns - what he

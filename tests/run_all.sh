@@ -71,6 +71,12 @@ python3 tests/test_structured_results.py || fail=1
 echo "== whole sessions, replayed =="
 python3 tests/test_sessions.py || fail=1
 
+echo "== tool argument repair =="
+python3 tests/test_arg_repair.py || fail=1
+
+echo "== results cache =="
+python3 tests/test_cache.py || fail=1
+
 echo "== design lint (contrast, type scale, sheet) =="
 python3 tests/test_design.py || fail=1
 

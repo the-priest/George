@@ -39,7 +39,7 @@ from george_platform import IS_WINDOWS
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "3.9.0"
+VERSION = "4.0.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = osx.config_dir()
@@ -101,6 +101,9 @@ DEFAULTS: Dict[str, Any] = {
     # After a tool-backed answer, check it against the observations and
     # repair it once. Costs one cheap extra call on those turns only.
     "verify": "on",                  # on | off
+    # Short-lived cache for weather, news and search so a follow-up
+    # question does not re-hit the network. See CACHE_TTL.
+    "cache": True,
     "thinking": "off",               # auto | off | on  (see chat_stream)
 
     "voice_enabled": True,
@@ -1887,6 +1890,77 @@ def weather(location: str = "") -> Dict[str, str]:
         "max_c": today.get("maxtempC", "?"),
         "min_c": today.get("mintempC", "?"),
     }
+
+
+# =====================================================================
+# RESULTS CACHE
+#
+# Asking the weather twice in a minute hit wttr.in twice. Asking for the
+# news, then asking a follow-up about one of the headlines, re-fetched
+# every feed. On a laptop that is seconds of waiting for an answer
+# George already had, and it makes him look slow for no reason.
+#
+# A short TTL is the whole design. Long enough that a follow-up question
+# is instant, short enough that "what's the weather NOW" is never
+# answered from ten minutes ago. Different data ages differently, so the
+# TTL is per-kind rather than global.
+# =====================================================================
+
+_CACHE: Dict[str, Tuple[float, Any]] = {}
+_CACHE_LOCK = threading.Lock()
+
+# seconds. News moves slower than it feels; weather is checked because
+# he is about to walk outside, so it gets the shortest life.
+CACHE_TTL = {
+    "weather": 300,
+    "news": 420,
+    "search": 900,
+    "page": 900,
+}
+
+
+def cache_get(kind: str, key: str) -> Any:
+    """Cached value, or None. Never raises -- a broken cache must not
+    be able to break a lookup."""
+    try:
+        ttl = CACHE_TTL.get(kind, 300)
+        with _CACHE_LOCK:
+            hit = _CACHE.get("%s:%s" % (kind, key))
+        if hit is None:
+            return None
+        when, value = hit
+        if (time.time() - when) > ttl:
+            return None
+        return value
+    except Exception:
+        return None
+
+
+def cache_put(kind: str, key: str, value: Any) -> None:
+    try:
+        with _CACHE_LOCK:
+            _CACHE["%s:%s" % (kind, key)] = (time.time(), value)
+            # Bounded: this lives for the life of the process and a
+            # long session must not grow it without limit.
+            if len(_CACHE) > 120:
+                oldest = sorted(_CACHE.items(), key=lambda kv: kv[1][0])
+                for k, _v in oldest[:40]:
+                    _CACHE.pop(k, None)
+    except Exception:
+        pass
+
+
+def cache_clear() -> None:
+    with _CACHE_LOCK:
+        _CACHE.clear()
+
+
+def cache_age(kind: str, key: str) -> Optional[int]:
+    """How old the cached value is, in whole seconds."""
+    with _CACHE_LOCK:
+        hit = _CACHE.get("%s:%s" % (kind, key))
+    return int(time.time() - hit[0]) if hit else None
+
 
 
 def open_in_browser(url: str, cfg: Dict[str, Any]) -> str:

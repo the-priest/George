@@ -5,8 +5,11 @@ thing by running it. Everything below is grounded in something measured
 or something that actually broke, not in a general sense of what apps
 should have.
 
-**Status:** 1.1, 1.2, 1.3, 2.1 and 2.2 are done as of v3.9.0. Tier 1 is
-clear except 1.4 (the error-swallowing audit).
+**Status:** 1.1, 1.2, 1.3, 2.1, 2.2, 2.3 and 2.5 are done as of v4.0.0 -
+seven of the thirteen items, and every one that could be done without
+his usage data. Tier 1 is clear except 1.4 (the error-swallowing audit).
+Remaining in Tier 2: 2.4 (router rules, needs his logs) and 2.6
+(conversation retrieval).
 
 **Standing rule from 1.3:** when something breaks, add the session to
 `tests/test_sessions.py` BEFORE fixing it. A scenario is cheap; a repeat
@@ -161,7 +164,7 @@ re-deriving them. Cuts tokens and errors together.
 
 **Cost: medium. Value: high.**
 
-### 2.3 Argument repair instead of blind retry
+### 2.3 Argument repair instead of blind retry  -- DONE in 3.10.0
 A malformed tool call currently fails and the model tries again from
 scratch. With a per-tool arg schema, a wrong key can be *corrected*
 (`url` vs `link`, `q` vs `query`) or asked about precisely.
@@ -185,7 +188,7 @@ guessing.
 
 **Cost: small per rule. Value: compounding.**
 
-### 2.5 A results cache
+### 2.5 A results cache  -- DONE in 4.0.0
 Weather, news and search for the same query inside a few minutes hit the
 network again every time. A 5–10 minute TTL cache makes repeated
 questions instant and makes George usable offline for a short while.

@@ -65,6 +65,12 @@ ITEMS = [{"source": "RTE", "title": "A headline", "url": "https://x.invalid",
 
 
 def fake_detailed(items, failures, tried):
+    # Clear the results cache: this file feeds tool_news a DIFFERENT
+    # result each scenario while asking the same question, which real
+    # use never does. Without this, scenario two is answered from
+    # scenario one's cache.
+    gc.cache_clear()
+
     def _f(_feeds, per_feed=5, topic=""):
         return list(items), list(failures), tried
     return _f

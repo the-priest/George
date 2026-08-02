@@ -28,7 +28,8 @@ from george_core import (
     NOTES_PATH,
     machine_summary,
     Ollama, OllamaError, _ensure_dirs, clipboard_read, clipboard_write,
-    detect_pkg_mgr, disk_report, fetch_news_detailed, find_files,
+    cache_get, cache_put, detect_pkg_mgr, disk_report,
+    fetch_news_detailed, find_files,
     html_to_text, http_get,
     inside_sandbox, is_destructive_command, is_network_pipe_to_shell,
     command_needs_confirmation, launch_app, list_processes, log,
@@ -323,13 +324,22 @@ def _fmt_results(results: List[Dict[str, str]]) -> str:
     return "\n".join(out)
 
 
+def _cache_on(ag: "Agent") -> bool:
+    return bool(ag.cfg.get("cache", True))
+
+
 def tool_web_search(args: Dict[str, Any], ag: "Agent") -> str:
     q = str(args.get("query", "")).strip()
     if not q:
         return "no query given"
     n = int(args.get("count") or 6)
     ag.step("searching the web: %s" % q)
-    res = web_search(q, max(3, min(n, 10)))
+    ckey = "%s|%d" % (q.lower(), n)
+    res = cache_get("search", ckey) if _cache_on(ag) else None
+    if res is None:
+        res = web_search(q, max(3, min(n, 10)))
+        if res:
+            cache_put("search", ckey, res)
     ag.tool_card("web_search", q, "%d results" % len(res))
     return _fmt_results(res)
 
@@ -353,8 +363,18 @@ def tool_news(args: Dict[str, Any], ag: "Agent") -> str:
     topic = str(args.get("topic", "") or "").strip()
     count = int(args.get("count") or ag.cfg.get("news_count") or 12)
     ag.step("pulling headlines%s" % (" about %s" % topic if topic else ""))
-    items, failures, tried = fetch_news_detailed(
-        ag.cfg.get("feeds") or DEFAULT_FEEDS, per_feed=6, topic=topic)
+    ckey = "%s|%d" % (topic.lower(), count)
+    cached = cache_get("news", ckey) if _cache_on(ag) else None
+    if cached is not None:
+        items, failures, tried = cached
+    else:
+        items, failures, tried = fetch_news_detailed(
+            ag.cfg.get("feeds") or DEFAULT_FEEDS, per_feed=6, topic=topic)
+        # Only cache a result worth reusing. Caching a total failure
+        # would keep telling him the feeds are down for seven minutes
+        # after they came back.
+        if items:
+            cache_put("news", ckey, (items, failures, tried))
     items = items[:max(3, min(count, 30))]
     ag.show_news(items)
     ag.tool_card("news", topic or "top stories", "%d headlines" % len(items))
@@ -413,7 +433,13 @@ def tool_show(args: Dict[str, Any], ag: "Agent") -> str:
 def tool_weather(args: Dict[str, Any], ag: "Agent") -> str:
     loc = str(args.get("location", "") or ag.cfg.get("location") or "")
     ag.step("checking the weather")
-    w = weather(loc)
+    cached = cache_get("weather", loc.lower()) if _cache_on(ag) else None
+    if cached is not None:
+        w = cached
+    else:
+        w = weather(loc)
+        if not w.get("error"):
+            cache_put("weather", loc.lower(), w)
     if w.get("error"):
         return w["error"]
     ag.show_weather(w)
@@ -848,6 +874,148 @@ def tool_open_path(args: Dict[str, Any], ag: "Agent") -> str:
     ag.tool_card("open_path", path, "ok" if res.startswith("opened")
                  else "failed")
     return res
+
+
+
+# =====================================================================
+# ARGUMENT REPAIR
+#
+# Constrained decoding pins the OUTER shape -- one object, a real tool
+# name, an args object. It deliberately leaves `args` free-form, because
+# a schema strict enough for all 33 tools would make an unlisted key
+# impossible rather than merely wrong.
+#
+# So the inside still needs help. A 4B reaches for the obvious synonym:
+# `link` for `url`, `q` for `query`, `cmd` for `command`, `file` for
+# `path`. It also flattens -- {"tool":"show","url":"..."} with no args
+# object at all -- and it sometimes passes a bare string where a dict
+# belongs.
+#
+# All of that is REPAIRABLE WITHOUT ASKING THE MODEL AGAIN, which is the
+# point: a round trip on CPU is seconds, and a rename is a dictionary
+# lookup. What cannot be repaired gets an error naming the exact key
+# that was wanted, rather than a generic failure the model can only
+# respond to by guessing again.
+# =====================================================================
+
+# tool -> (primary key, {alias: primary})
+ARG_ALIASES: Dict[str, Dict[str, str]] = {
+    "web_search": {"q": "query", "search": "query", "term": "query",
+                   "text": "query", "topic": "query", "keywords": "query"},
+    "research": {"q": "query", "topic": "query", "search": "query",
+                 "text": "query"},
+    "open_page": {"link": "url", "address": "url", "page": "url",
+                  "website": "url", "site": "url", "href": "url"},
+    "show": {"link": "url", "address": "url", "page": "url",
+             "website": "url", "site": "url", "href": "url"},
+    "open_path": {"file": "path", "filename": "path", "folder": "path",
+                  "dir": "path", "directory": "path", "target": "path"},
+    "run": {"cmd": "command", "shell": "command", "exec": "command",
+            "script": "command", "line": "command"},
+    "code": {"lang": "language", "code": "source", "text": "source",
+             "script": "source", "program": "source", "body": "source"},
+    "pkg": {"verb": "action", "operation": "action", "name": "package",
+            "pkg": "package", "package_name": "package"},
+    "read_file": {"file": "path", "filename": "path", "target": "path"},
+    "write_file": {"file": "path", "filename": "path", "content": "text",
+                   "body": "text", "data": "text"},
+    "find": {"name": "pattern", "glob": "pattern", "query": "pattern",
+             "dir": "path", "folder": "path", "directory": "path"},
+    "list_dir": {"dir": "path", "folder": "path", "directory": "path"},
+    "note": {"content": "text", "body": "text", "note": "text"},
+    "say": {"message": "text", "content": "text", "speech": "text"},
+    "answer": {"message": "text", "content": "text", "reply": "text",
+               "response": "text", "answer": "text"},
+    "remember": {"name": "key", "fact": "value", "content": "value"},
+    "recall": {"q": "query", "key": "query", "search": "query"},
+    "forget": {"name": "key"},
+    "calc": {"expr": "expression", "equation": "expression",
+             "math": "expression", "query": "expression"},
+    "timer": {"duration": "seconds", "time": "seconds", "name": "label"},
+    "launch": {"application": "app", "program": "app", "name": "app"},
+    "see": {"q": "question", "query": "question", "prompt": "question"},
+    "weather": {"place": "location", "city": "location", "where": "location"},
+    "news": {"category": "topic", "subject": "topic", "about": "topic"},
+    "media": {"command": "action", "control": "action"},
+    "volume": {"command": "action", "control": "action", "value": "level"},
+    "power": {"command": "action", "mode": "action"},
+    "clipboard": {"action": "mode", "operation": "mode"},
+    "processes": {"by": "sort", "order": "sort", "key": "sort"},
+}
+
+# The one key each tool cannot work without. A bare string arg is put
+# here, and a missing one produces a precise complaint.
+ARG_REQUIRED: Dict[str, str] = {
+    "web_search": "query", "research": "query", "open_page": "url",
+    "show": "url", "open_path": "path", "run": "command",
+    "code": "source", "read_file": "path", "write_file": "path",
+    "find": "pattern", "list_dir": "path", "note": "text", "say": "text",
+    "answer": "text", "remember": "key", "recall": "query",
+    "forget": "key", "calc": "expression", "timer": "seconds",
+    "launch": "app", "see": "question", "pkg": "package",
+}
+
+
+def repair_args(tool: str, args: Any) -> Tuple[Dict[str, Any], List[str]]:
+    """Fix what can be fixed. Returns (args, notes on what was changed).
+
+    Never invents a value -- only renames keys the model got wrong and
+    lifts a bare string into the key that tool actually wants.
+    """
+    notes: List[str] = []
+
+    # A bare string or number where a dict belongs: the model meant the
+    # tool's one required argument.
+    if not isinstance(args, dict):
+        want = ARG_REQUIRED.get(tool)
+        if want and isinstance(args, (str, int, float)) and str(args).strip():
+            notes.append("wrapped a bare value as %s" % want)
+            return {want: args}, notes
+        return {}, notes
+
+    out = dict(args)
+
+    # Some models nest the real args one level down.
+    for wrapper in ("args", "arguments", "parameters", "params", "input"):
+        inner = out.get(wrapper)
+        if isinstance(inner, dict) and len(out) == 1:
+            notes.append("unwrapped a nested %r object" % wrapper)
+            out = dict(inner)
+            break
+
+    aliases = ARG_ALIASES.get(tool, {})
+    for wrong, right in aliases.items():
+        if wrong in out and right not in out:
+            out[right] = out.pop(wrong)
+            notes.append("%s -> %s" % (wrong, right))
+
+    # Still missing the essential key, but exactly one unrecognised
+    # value is present: that is what it meant.
+    want = ARG_REQUIRED.get(tool)
+    if want and want not in out:
+        known = set(aliases.values()) | set(aliases) | {want}
+        spare = [(k, v) for k, v in out.items()
+                 if k not in known and isinstance(v, (str, int, float))
+                 and str(v).strip()]
+        if len(spare) == 1:
+            k, v = spare[0]
+            out[want] = out.pop(k)
+            notes.append("%s -> %s (only candidate)" % (k, want))
+    return out, notes
+
+
+def missing_arg_message(tool: str, args: Dict[str, Any]) -> str:
+    """A complaint the model can act on, instead of one it must guess at."""
+    want = ARG_REQUIRED.get(tool)
+    if not want or want in args:
+        return ""
+    aliases = sorted(k for k, v in ARG_ALIASES.get(tool, {}).items()
+                     if v == want)
+    hint = (" It is not `%s` either." % "` or `".join(aliases[:3])) \
+        if aliases else ""
+    return ('%s needs `%s` in args and it was not there. You sent: %s.%s '
+            'Call it again with {"tool": "%s", "args": {"%s": ...}}.'
+            % (tool, want, sorted(args) or "nothing", hint, tool, want))
 
 
 
@@ -1581,6 +1749,17 @@ class Agent:
         if not fn:
             return ("unknown tool %r. Valid tools: %s"
                     % (tool, ", ".join(sorted(TOOLS))))
+
+        # Repair before running. A renamed key costs a dict lookup; a
+        # retry costs a whole round trip on CPU.
+        args, notes = repair_args(tool, args)
+        if notes:
+            log("args: repaired %s (%s)" % (tool, "; ".join(notes)))
+        complaint = missing_arg_message(tool, args)
+        if complaint:
+            log("args: %s" % complaint)
+            return complaint
+
         box: Dict[str, str] = {}
         self.confirm_elapsed = 0.0
 

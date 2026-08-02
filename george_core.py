@@ -115,7 +115,7 @@ DEFAULTS: Dict[str, Any] = {
     "user_name": "",
     # Tunables for agent behaviour
     "short_final_len": 20,               # <= this length considered 'short' for replacement
-    "dedupe_repeat_threshold": 2,        # how many times the same tool+args may run before dedupe
+    "dedupe_repeat_threshold": 1,        # how many times the same tool+args may run before dedupe (1 = skip immediate on repeat)
     "final_replacement_enabled": True,
 }
 

@@ -855,9 +855,11 @@ class Agent:
                     break
 
                 self.on_step("thinking (step %d)" % (step_no + 1))
+                log("agent: calling chat_stream with %d history items" % len(self.history))
                 reply = self.ollama.chat_stream(self.messages(), self.on_token,
                                                 self.stop_event,
                                                 on_stall=stalled, model=model)
+                log("agent: chat_stream returned %d chars" % len(reply))
                 if self.stop_event.is_set():
                     self.on_step("stopped")
                     break
@@ -866,10 +868,13 @@ class Agent:
                     break
 
                 self.history.append({"role": "assistant", "content": reply})
+                log("agent: assistant reply (trunc): %s" % reply[:300].replace('\n',' '))
                 actions = extract_actions(reply)
+                log("agent: extracted %d actions" % len(actions))
 
                 if not actions:
                     prose = strip_action_json(reply)
+                    log("agent: final prose -> %s" % (prose or "(no reply)"))
                     self.on_final(prose or "(no reply)")
                     self.tts.speak(prose)
                     break
@@ -881,14 +886,17 @@ class Agent:
                         break
                     if tool == "answer":
                         final_text = str(args.get("text", "")).strip()
+                        log("agent: got an answer action -> %s" % final_text[:120])
                         break
 
                     sig = tool + json.dumps(args, sort_keys=True)[:200]
+                    log("agent: tool call candidate %s args=%s" % (tool, json.dumps(args, sort_keys=True)))
                     if last_calls.count(sig) >= 2:
                         observations.append(
                             "%s: you already ran this twice with the same "
                             "arguments and got the same thing. Use what you "
                             "have and answer him." % tool)
+                        log("agent: dedupe skipped tool %s" % tool)
                         continue
                     last_calls.append(sig)
 
@@ -898,6 +906,7 @@ class Agent:
                         # observation and starts ignoring the question.
                         result = result[:6000] + "\n[... trimmed]"
                     observations.append("OBSERVATION (%s):\n%s" % (tool, result))
+                    log("agent: tool %s returned %d chars" % (tool, len(result)))
 
                 if final_text is not None:
                     self.on_final(final_text)

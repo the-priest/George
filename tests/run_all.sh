@@ -47,6 +47,9 @@ python3 tests/test_speed.py || fail=1
 echo "== intent router =="
 python3 tests/test_router.py || fail=1
 
+echo "== system prompt =="
+python3 tests/test_prompt.py || fail=1
+
 echo "== design lint (contrast, type scale, sheet) =="
 python3 tests/test_design.py || fail=1
 

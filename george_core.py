@@ -39,7 +39,7 @@ from george_platform import IS_WINDOWS
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = osx.config_dir()

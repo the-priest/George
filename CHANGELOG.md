@@ -1,5 +1,53 @@
 # George changelog
 
+## 3.1.0 - a prompt the model can actually follow
+
+The prompt had grown by accretion. Every fix across a dozen versions
+appended another bullet to a flat RULES list until it was a wall of
+overlapping instructions with no structure. A 4B model reads that the
+way you would read a contract.
+
+- **Rewritten as six numbered sections** - how a turn works, when to use
+  a tool and when not to, the tool catalogue, hard rules, commands for
+  this machine, context. Each rule stated once, in one place, numbered
+  R1-R8 so it can be pointed at.
+- **Four worked examples of the actual JSON protocol.** A small model
+  copies patterns far more reliably than it follows prose, so the prompt
+  now SHOWS a no-tool answer, a tool-then-answer round trip, what to do
+  when an observation is already waiting, and what to say when a tool
+  FAILED - including, explicitly, that you do not claim it worked.
+- **The router contract is explained to the model.** It now knows that
+  an OBSERVATION followed by a GUIDANCE line means the obvious tool was
+  already run to save it a step, that it must not call that tool again,
+  and that it should go straight to `answer`.
+- **The tool catalogue is grouped by JOB, not listed flat.** Nine
+  headings: looking things up, putting something in front of him, this
+  machine, doing things to the machine, files, eyes and clipboard,
+  memory, odds and ends, ending the turn. A model scanning 29 flat names
+  picks by string similarity; grouped under a heading that matches his
+  words, it picks by intent. The "putting something in front of him"
+  group exists specifically so the difference between `news` and `show`
+  is structural rather than something it has to infer.
+- **Command reference for this box** as a table rather than a sentence:
+  pacman install vs query vs ownership vs AUR, and the Debian, Fedora
+  and Windows equivalents.
+- **Fixed: "You are George, his's desktop assistant."** The name
+  fallback was the bare word "his", so every user who had not set a name
+  got a broken first sentence. The possessive is applied where the name
+  is resolved now.
+- ~2475 tokens, up from ~1809, and built once per turn so it is
+  prefilled once rather than on every step. Local tokens are free; a
+  small model's attention is not, so there is a hard ceiling in the
+  tests at 3200.
+- **New `tests/test_prompt.py`**: every registered tool documented and
+  no phantom ones, all four worked examples present, the router
+  convention explained, each hard-won rule still there by exact phrase,
+  the catalogue grouped, ASCII-clean, building under every persona, and
+  the token ceiling.
+- Two of those checks were wrong on first run and I fixed the TEST, not
+  the prompt: `}}` is legitimate when it closes nested JSON, and the
+  on-screen group is called "putting something in front of him".
+
 ## 3.0.0 - the router
 
 George's loop made the model decide things the words had already

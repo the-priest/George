@@ -1,6 +1,6 @@
 ; Inno Setup script for George.
 ;
-; Build:  iscc /DVersion=3.0.0 packaging\george.iss
+; Build:  iscc /DVersion=3.1.0 packaging\george.iss
 ; Expects PyInstaller's dist\George\ to exist already.
 ;
 ; This is the Windows equivalent of install.sh: it puts George somewhere
@@ -9,7 +9,7 @@
 ; Per-user by default so it needs no administrator rights.
 
 #ifndef Version
-  #define Version "3.0.0"
+  #define Version "3.1.0"
 #endif
 
 #define AppName "George"

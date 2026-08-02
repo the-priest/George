@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/the-priest/George/main/install.sh |
 
 That one line does the lot: detects your distro, installs the GTK4 stack,
 installs Ollama (the CUDA or ROCm build if it sees your GPU), pulls
-`deepseek-r1:7b`, drops George in `~/.local/share/george` with a launcher,
+`qwen3:4b`, drops George in `~/.local/share/george` with a launcher,
 a desktop entry and an icon.
 
 Tuned for CachyOS, works on Arch, Debian/Ubuntu, Fedora/RHEL, openSUSE,
@@ -27,7 +27,7 @@ Alpine and Void.
 | flag | does |
 |---|---|
 | `--yes` | no prompts (does **not** auto-approve piping remote scripts to a shell) |
-| `--model <tag>` | pull something other than `deepseek-r1:7b` |
+| `--model <tag>` | pull something other than `qwen3:4b` |
 | `--no-model` | skip the multi-GB download, grab it later in-app |
 | `--no-deps` | you already have GTK4 and PyGObject |
 | `--deps-only` | dependencies, nothing else |
@@ -102,7 +102,7 @@ The **ENGINE** card in the sidebar always says which of those it is.
 Menu → **Models**:
 
 - everything on the box, with sizes, one click to make it active, one to delete
-- a suggested list (deepseek-r1 7b/8b/14b, qwen2.5, llama3.1, mistral, gemma2, phi4, coder, llava)
+- a suggested list (qwen3 4b/8b/14b, granite4, llama3.2, llama3.1, mistral, gemma2, phi4, coder, llava)
 - a box to pull any tag from `ollama.com/library`, with a live progress bar
 
 ## What it does

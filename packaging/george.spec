@@ -126,6 +126,7 @@ hiddenimports = [
     # them so a typo in an import shows up at build time, not at launch.
     "george_core", "george_platform", "george_theme", "george_tools",
     "george_hud", "george_voice", "george_vision", "george_sound",
+    "george_intent",
     "winsound",
 ]
 

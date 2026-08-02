@@ -292,6 +292,14 @@ headerbar button:active, headerbar button:checked, .pill-btn:checked {
 
 .news-title { font-size: %(fs)dpx; color: %(text)s; }
 
+.warn-text {
+    font-family: %(mono)s;
+    font-size: %(fxx)dpx;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: %(warn)s;
+}
+
 .news-src {
     font-family: %(mono)s;
     font-size: %(fxx)dpx;

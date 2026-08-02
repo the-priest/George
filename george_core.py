@@ -39,7 +39,7 @@ from george_platform import IS_WINDOWS
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "2.6.0"
+VERSION = "3.0.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = osx.config_dir()
@@ -62,7 +62,13 @@ DEFAULT_FEEDS = [
 
 DEFAULTS: Dict[str, Any] = {
     "ollama_url": "http://localhost:11434",
-    "model": "deepseek-r1:7b",
+    # qwen3:4b, not a 7B reasoner. George drives a TOOL LOOP: what
+    # matters is emitting clean JSON on the first try and doing it fast,
+    # not prose quality. A reasoner thinks before every one of up to 14
+    # steps, so its thinking cost is paid over and over in a single
+    # answer, and on a laptop without a real GPU that is the difference
+    # between a reply and a wait.
+    "model": "qwen3:4b",
     "temperature": 0.6,
     "num_ctx": 8192,
     "keep_alive": "30m",
@@ -98,6 +104,9 @@ DEFAULTS: Dict[str, Any] = {
     "persona": "jarvis",             # jarvis | plain | blunt
     "accent": "cyan",                # cyan | amber | violet | green | red
     "ui_density": "comfortable",     # comfortable | compact
+    # The intent router pre-runs the obviously-implied tool before the
+    # first model call. Off = the model decides everything itself.
+    "router": True,
     "wallpaper": True,               # bundled art washed in behind the chat
     "animations": True,
     "safe_graphics": False,          # cairo renderer; see the runtime hook
@@ -1540,13 +1549,26 @@ class CpuMeter:
 _cpu_meter = CpuMeter()
 
 
+_MACHINE_SUMMARY: Optional[str] = None
+
+
 def machine_summary() -> str:
     """One dense line about the box, for the system prompt.
 
     He was answering questions about "a Linux machine" in the abstract
     because the prompt only carried the distro name. Package manager and
     session type in particular change what the right answer actually is.
+
+    CACHED FOR THE LIFE OF THE PROCESS.  Distro, kernel, arch, desktop,
+    CPU model, core count, GPU and package manager cannot change while
+    George is running, but building this line shells out -- lspci for
+    the GPU, several shutil.which calls for the package manager -- and
+    it was being rebuilt on EVERY step of EVERY turn, up to fourteen
+    times an answer, on a laptop doing CPU inference at the same time.
     """
+    global _MACHINE_SUMMARY
+    if _MACHINE_SUMMARY is not None:
+        return _MACHINE_SUMMARY
     st = system_status()
     bits = ["%s on %s" % (st.get("distro", "this machine"),
                           st.get("arch", "?"))]
@@ -1562,7 +1584,12 @@ def machine_summary() -> str:
     if st.get("cores"):
         bits.append("%s cores" % st["cores"])
     if st.get("memory"):
-        bits.append("%s ram" % st["memory"].split("(")[0].strip())
+        # TOTAL ram only. "0.2 / 3.9 GiB" carries live usage, which would
+        # be frozen at startup by the cache above and quietly wrong an
+        # hour later. How much the box HAS is a fact about the machine;
+        # how much is in use is a question for the `system` tool.
+        total = st["memory"].split("(")[0].split("/")[-1].strip()
+        bits.append("%s ram" % (total or st["memory"]))
     if st.get("gpu"):
         bits.append("gpu " + st["gpu"])
     pkg = detect_pkg_mgr()
@@ -1570,9 +1597,13 @@ def machine_summary() -> str:
         bits.append("package manager: %s" % pkg)
     if st.get("shell"):
         bits.append("shell %s" % st["shell"])
-    if st.get("battery"):
-        bits.append("battery %s" % st["battery"])
-    return ", ".join(bits)
+    # Battery is deliberately NOT in here: it changes constantly, and any
+    # change to the system prompt invalidates ollama's cached prefix and
+    # forces a full re-prefill of the whole thing. It is reported once
+    # per turn from the live status instead.
+    _MACHINE_SUMMARY = ", ".join(bits)
+    globals()["_MACHINE_SUMMARY"] = _MACHINE_SUMMARY
+    return _MACHINE_SUMMARY
 
 
 def system_status() -> Dict[str, str]:
@@ -2566,6 +2597,34 @@ CURATED_MODELS = [
     ("qwen2.5-coder:7b", "4.7 GB", "code"),
     ("llava:7b", "4.7 GB", "vision"),
 ]
+
+
+# Models that are a poor fit for driving a tool loop, and why. Matched
+# as substrings against the active tag.
+_MODEL_WARNINGS = [
+    ("coder", "a code-completion model - it follows conversational "
+              "instructions and emits tool JSON poorly"),
+    ("deepseek-r1", "a reasoner - it thinks before every one of up to 14 "
+                    "steps, so a single answer pays that cost repeatedly"),
+    ("-r1", "a reasoner - the thinking cost is paid on every loop step"),
+    ("llava", "a vision model - weak at tool calling and general chat"),
+    ("embed", "an embedding model - it cannot hold a conversation at all"),
+]
+
+
+def model_advice(tag: str) -> str:
+    """Plain-language warning if this model is wrong for the job.
+
+    He was running qwen2.5-coder:7b and finding George slow and dim,
+    which is exactly what that model does here. The app knows better and
+    should say so instead of letting him assume George is just bad.
+    """
+    t = str(tag or "").lower()
+    for token, why in _MODEL_WARNINGS:
+        if token in t:
+            return ("%s is %s. Try %s from the Models dialog."
+                    % (tag, why, CURATED_MODELS[0][0]))
+    return ""
 
 
 class ModelManager:

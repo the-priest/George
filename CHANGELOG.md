@@ -1,5 +1,87 @@
 # George changelog
 
+## 3.0.0 - the router
+
+George's loop made the model decide things the words had already
+decided. "What's the weather?" cost two full model round trips: one to
+pick the weather tool, one to write the answer. On CPU inference that is
+most of the latency of a turn, spent on a choice that was never in
+doubt.
+
+- **New `george_intent.py` - a tenth module, and the first one that is
+  pure architecture.** It recognises the obvious requests and RUNS THE
+  TOOLS BEFORE the model is called at all. The model then gets one call
+  with the observations already in hand and only has to write the reply.
+  One round trip instead of two or three. Verified end to end: the same
+  question takes 1 model call with the router on and 2 with it off.
+- **Eleven rules**, covering weather, this machine, disk, what is eating
+  the box, network, news, time, explicit web searches, opening a URL,
+  memory recall - and `brief me` / `what did I miss` / `how's
+  everything`, which fire system + weather + news together in one shot.
+  Small talk routes to no tools at all.
+- **Deliberately conservative.** A miss costs one extra round trip -
+  exactly what happened before. A WRONG prefetch wastes a tool run and
+  pollutes the context, which is worse. So capability questions ("can
+  you explain how TCP works"), instructions about future behaviour
+  ("next time just tell me the headline"), real work ("write me a
+  script"), and keywords buried in prose all decline to route. The
+  "must not route" cases are tested as hard as the ones that must.
+- **Contractions are folded before punctuation is stripped.** Otherwise
+  "how's" becomes "how s" - two tokens - and every rule written as
+  `how'?s` silently stops matching. That was costing the router most of
+  its hit rate before it ever shipped.
+- **A URL beats a keyword inside it.** "open https://news.ycombinator.com"
+  matched the news rule, because the word "news" is in the hostname, and
+  pulled RSS feeds instead of opening the page he named. The show rule
+  is first on purpose.
+- Routing costs ~11 microseconds per message. It runs before every turn,
+  so that is tested too.
+- Switchable: Settings > Interface > Fast routing, and the `router`
+  config key. Off means the model decides everything itself, exactly as
+  before.
+- `george_intent.py` added to install.sh REQUIRED_FILES and the
+  PyInstaller spec. install.ps1 takes the whole zipball, so it needed
+  nothing.
+- **New `tests/test_router.py`**: every rule, every must-not-route case,
+  the URL-versus-keyword precedence, the disable flag, the routing cost,
+  and the end-to-end round-trip saving with a counting mock.
+
+## 2.7.0 - why it was slow, and why it seemed dumb
+
+- **The system prompt was rebuilt on every step of the loop** - up to
+  fourteen times per answer - and that is the single biggest reason a
+  turn crawled. It cost twice over. It shelled out each time
+  (system_status twice, lspci for the GPU, several shutil.which for the
+  package manager) on a laptop already saturated doing CPU inference.
+  And, worse, the text CHANGED between steps, because it carried the
+  clock minute, uptime and battery level. Ollama caches the KV prefix of
+  a prompt; ANY change to the system message throws that away, so every
+  single step re-prefilled all ~1800 tokens from scratch instead of
+  reusing them. The prompt is now built once per turn and is
+  byte-identical for every step of it.
+- **`machine_summary()` is cached for the life of the process.** Distro,
+  kernel, arch, desktop, CPU, cores, GPU and package manager cannot
+  change while George is running. Battery came out of that line
+  entirely - it changes constantly, and anything that changes does not
+  belong in a cached prefix. RAM is now the TOTAL, not live usage, which
+  would have frozen at startup and been quietly wrong an hour later.
+- **The default model is now `qwen3:4b`, not `deepseek-r1:7b`.** George
+  drives a tool loop: what matters is clean JSON on the first try and
+  speed, not prose. A reasoner thinks before every one of up to 14
+  steps, so a single answer pays that cost over and over. Changed in
+  DEFAULTS, install.sh, install.ps1 and the README.
+- **George now tells him when the model is the problem.** Running a
+  code-completion, reasoning, vision or embedding model in a tool loop
+  feels exactly like "slow and dumb", and it is fixable in one click.
+  The ENGINE card shows a "wrong model for this job" row naming the
+  reason, and opens the Models dialog when clicked.
+- Two tests were asserting the old default model rather than catching a
+  regression - the fallback path was working correctly. Fixed the tests.
+- **New `tests/test_speed.py`**: the prompt must be identical across all
+  fourteen steps of a turn AND across a minute boundary, cached fetches
+  must be effectively free, `machine_summary` must be cached and carry
+  no live values, and the DEFAULT model must not be one we warn about.
+
 ## 2.6.0 - George stops claiming things he did not do
 
 He asked for the news. George said "News articles are now on his

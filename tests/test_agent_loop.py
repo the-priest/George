@@ -24,7 +24,7 @@ calls = {"n": 0, "prompts": []}
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
-        body = json.dumps({"models": [{"name": "deepseek-r1:7b"}]}).encode()
+        body = json.dumps({"models": [{"name": "qwen3:4b"}]}).encode()
         self.send_response(200); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body))); self.end_headers()
         self.wfile.write(body)

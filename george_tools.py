@@ -18,7 +18,7 @@ import re
 import threading
 import time
 import urllib.parse
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from george_core import (
     APP_NAME, DEFAULT_FEEDS, HOME, POWER_ACTIONS, MemoryStore, NOTES_PATH,
@@ -31,6 +31,7 @@ from george_core import (
     power_action, run_shell, safe_calc, strip_reasoning, system_status,
     take_screenshot, volume_control, weather, web_search, write_text_file,
 )
+import george_intent as intent
 from george_voice import TextToSpeech
 
 
@@ -757,6 +758,7 @@ class Agent:
         self.tts = tts
         self.ollama = Ollama(cfg)
         self.history: List[Dict[str, str]] = []
+        self._prompt_cache: Optional[str] = None
         self.stop_event = threading.Event()
         self.busy = False
         self.confirm_elapsed = 0.0
@@ -806,6 +808,41 @@ class Agent:
 
     # ---- prompt ------------------------------------------------------
     def system_message(self) -> str:
+        """The system prompt, built ONCE PER TURN and reused for every
+        step of that turn.
+
+        This used to be rebuilt on every step -- up to fourteen times an
+        answer -- and that cost twice over:
+
+          * it shelled out each time (system_status, lspci for the GPU,
+            several shutil.which for the package manager) on a laptop
+            already saturated doing CPU inference;
+          * worse, the text CHANGED between steps. The clock minute
+            ticks, uptime advances, the battery drips down. Ollama
+            caches the KV prefix of a prompt, and ANY change to the
+            system message invalidates the whole thing, so every step
+            re-prefilled all ~1800 tokens from scratch instead of
+            reusing them. That is the single biggest reason a turn
+            crawled.
+
+        The facts in here are turn-scoped anyway: he does not need the
+        clock to advance mid-answer.
+        """
+        if self._prompt_cache is not None:
+            return self._prompt_cache
+        self._prompt_cache = self._build_system_message()
+        return self._prompt_cache
+
+    def refresh_prompt(self) -> None:
+        """Drop the cached prompt so the next turn rebuilds it.
+
+        Called at the start of each turn, and after anything that
+        changes what the prompt should say (a new persona, a memory
+        write, a settings change).
+        """
+        self._prompt_cache = None
+
+    def _build_system_message(self) -> str:
         st = system_status()
         name = (self.cfg.get("user_name") or "").strip()
         extra_bits = ["CONTEXT",
@@ -872,6 +909,7 @@ class Agent:
 
     def reset(self) -> None:
         self.history = []
+        self.refresh_prompt()
 
     # ---- tool execution ----------------------------------------------
     def call_tool(self, tool: str, args: Dict[str, Any]) -> str:
@@ -918,6 +956,9 @@ class Agent:
     def run_turn(self, user_text: str) -> None:
         self.busy = True
         self.stop_event.clear()
+        # One prompt for the whole turn: rebuilt here, then byte-identical
+        # for every step, so ollama can reuse its cached prefix.
+        self.refresh_prompt()
         self.history.append({"role": "user", "content": user_text})
         last_calls: List[str] = []
         # Whether any real tool ran this turn.  A canned final answer only
@@ -939,6 +980,40 @@ class Agent:
                              % int(waited))
 
             recent_observations: List[str] = []
+
+            # ---- ROUTER ------------------------------------------------
+            # Run the obviously-implied tools BEFORE the first model call,
+            # so an answerable question costs one round trip instead of
+            # two or three. See george_intent for why and for the rules.
+            plan = None
+            try:
+                plan = intent.route(user_text,
+                                    bool(self.cfg.get("router", True)))
+            except Exception as exc:
+                log("router failed, falling through: %s" % exc)
+            if plan is not None:
+                log("router: %s" % intent.describe(plan))
+                pre: List[str] = []
+                for tool, args in plan.prefetch:
+                    if self.stop_event.is_set():
+                        break
+                    if tool not in TOOLS:
+                        continue
+                    self.on_step("%s (prefetched)" % tool)
+                    result = self.call_tool(tool, args)
+                    ran_tool_this_turn = True
+                    last_calls.append(tool + json.dumps(args, sort_keys=True)[:200])
+                    if len(result) > 6000:
+                        result = result[:6000] + "\n[... trimmed]"
+                    pre.append("OBSERVATION (%s):\n%s" % (tool, result))
+                if pre:
+                    recent_observations.extend(pre)
+                    self.history.append({"role": "user",
+                                         "content": "\n\n".join(pre)})
+                if plan.hint:
+                    self.history.append({"role": "user",
+                                         "content": "GUIDANCE: " + plan.hint})
+
             for step_no in range(int(self.cfg.get("max_steps", 14))):
                 if self.stop_event.is_set():
                     self.on_step("stopped")

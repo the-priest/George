@@ -8,7 +8,7 @@ calls = {"n": 0}
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
-        b = json.dumps({"models":[{"name":"deepseek-r1:7b","size":4700000000,"details":{"family":"qwen2"}},
+        b = json.dumps({"models":[{"name":"qwen3:4b","size":2600000000,"details":{"family":"qwen3"}},
                                   {"name":"qwen2.5:7b","size":4700000000,"details":{}}]}).encode()
         self.send_response(200); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_POST(self):

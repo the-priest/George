@@ -18,7 +18,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         b = json.dumps({"models": [
-            {"name": "deepseek-r1:7b", "size": 4700000000, "details": {}},
+            {"name": "qwen3:4b", "size": 2600000000, "details": {}},
             {"name": "qwen2.5:7b", "size": 4700000000, "details": {}}]}).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(b)))

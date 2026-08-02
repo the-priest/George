@@ -38,6 +38,7 @@ from george_core import (
     APP_ID, APP_NAME, CONFIG_PATH, CURATED_MODELS, DEFAULT_FEEDS, DEFAULTS,
     NOTES_PATH, VERSION, ChatStore, MemoryStore, ModelManager, Ollama,
     OllamaSupervisor, clipboard_write, fetch_news_detailed, install_hint,
+    model_advice,
     install_crash_handlers, load_config, log, open_in_browser, reasoning_of,
     save_config, system_status, take_screenshot, weather,
 )
@@ -1405,6 +1406,22 @@ class GeorgeWindow(Adw.ApplicationWindow):
         self.engine_body.append(_kv_row("voice", self.tts.engine_name))
         self.engine_body.append(_kv_row("persona",
                                         str(self.cfg.get("persona", "jarvis"))))
+        # If the loaded model is the wrong tool for the job, say so here
+        # rather than letting him conclude George is simply bad. A
+        # code-completion or reasoning model in a 14-step tool loop feels
+        # exactly like "slow and dumb", and that is fixable in one click.
+        advice = model_advice(str(self.cfg.get("model", "")))
+        if advice:
+            warn = Gtk.Button()
+            warn.add_css_class("row-btn")
+            inner = _box(spacing=2)
+            inner.append(_label("wrong model for this job", "warn-text",
+                                wrap=False))
+            inner.append(_label(advice, "faint"))
+            warn.set_child(inner)
+            warn.set_tooltip_text("Open the Models dialog")
+            warn.connect("clicked", lambda *_a: self._open_models())
+            self.engine_body.append(_margins(warn, 6, 0, 0, 0))
 
     def refresh_chats(self) -> None:
         self.chats.purge()
@@ -1985,6 +2002,10 @@ class GeorgeWindow(Adw.ApplicationWindow):
         grp.add(combo_for("ui_density", ["comfortable", "compact"], "Density"))
         row(grp, "Animate the HUD", "off saves a little power",
             switch_for("animations"))
+        row(grp, "Fast routing",
+            "run the obviously-implied tool before asking the model - "
+            "one round trip instead of two on common questions",
+            switch_for("router"))
         row(grp, "Artwork behind the chat",
             "the bundled George plate, washed right down so text stays "
             "readable", switch_for("wallpaper"))

@@ -91,7 +91,7 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        b = json.dumps({"models": [{"name": "deepseek-r1:7b",
+        b = json.dumps({"models": [{"name": "qwen3:4b",
                                     "size": 4700000000, "details": {}}],
                         "version": "0.5.0"}).encode()
         self.send_response(200)

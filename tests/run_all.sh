@@ -41,6 +41,12 @@ python3 tests/test_markup.py || fail=1
 echo "== no unverified claims about the screen =="
 python3 tests/test_no_false_claims.py || fail=1
 
+echo "== prompt stability / speed =="
+python3 tests/test_speed.py || fail=1
+
+echo "== intent router =="
+python3 tests/test_router.py || fail=1
+
 echo "== design lint (contrast, type scale, sheet) =="
 python3 tests/test_design.py || fail=1
 

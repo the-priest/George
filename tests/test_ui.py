@@ -88,7 +88,8 @@ def p2():
             if not kid.get_hexpand():
                 res["errors"].append("user bubble cannot align: no hexpand")
 
-    for name, fn in (("models", w._open_models), ("settings", w._open_settings),
+    for name, fn in (("trace", w._open_trace),
+                     ("models", w._open_models), ("settings", w._open_settings),
                      ("history", w._open_history), ("about", w._open_about),
                      ("shortcuts", w._open_shortcuts)):
         try: fn()

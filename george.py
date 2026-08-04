@@ -634,6 +634,7 @@ class GeorgeWindow(Adw.ApplicationWindow):
         entry("Refresh news", "F5", lambda: self._async_news(""))
         entry("Open notes", "", lambda: open_in_browser("file://" + NOTES_PATH,
                                                         self.cfg))
+        entry("What just happened", "Ctrl+D", self._open_trace)
         entry("Keyboard shortcuts", "", self._open_shortcuts)
         entry("About", "", self._open_about)
         pop.set_child(box)
@@ -1106,6 +1107,9 @@ class GeorgeWindow(Adw.ApplicationWindow):
             return True
         if keyval in (Gdk.KEY_h, Gdk.KEY_H):
             self._open_history()
+            return True
+        if keyval in (Gdk.KEY_d, Gdk.KEY_D):
+            self._open_trace()
             return True
         if keyval == Gdk.KEY_comma:
             self._open_settings()
@@ -1677,6 +1681,53 @@ class GeorgeWindow(Adw.ApplicationWindow):
         outer.append(hb)
         win.set_content(outer)
         return win, outer
+
+    def _open_trace(self) -> None:
+        """Show exactly what George did on the last turn.
+
+        Every bug in this project so far was found by him screenshotting
+        the window and me guessing backwards. The tool cards show WHICH
+        tool ran; this shows the arguments it was called with, the head
+        of what came back, whether it failed, and how long each step
+        took. Copy button, because the point is that it ends up in a bug
+        report rather than in a description of a bug report.
+        """
+        win, outer = self._dialog("What just happened", 720, 620)
+        col = _margins(_box(spacing=10), 14, 14, 18, 18)
+        col.append(_label(
+            "The last turn, step by step. Model calls, tools, arguments, "
+            "and what each one actually returned.", "dim"))
+
+        try:
+            text = self.agent.trace.summary()
+        except Exception as exc:
+            text = "could not read the trace: %s" % exc
+
+        view = Gtk.TextView()
+        view.set_monospace(True)
+        view.set_editable(False)
+        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        view.get_buffer().set_text(text)
+        holder = Gtk.ScrolledWindow()
+        holder.set_vexpand(True)
+        holder.add_css_class("hud-card")
+        holder.set_child(view)
+        col.append(holder)
+
+        bar = _box(horizontal=True, spacing=8)
+        bar.set_halign(Gtk.Align.END)
+        copy = Gtk.Button(label="Copy")
+        copy.add_css_class("chip")
+        copy.connect("clicked", lambda *_a: self.copy(text))
+        bar.append(copy)
+        shut = Gtk.Button(label="Close")
+        shut.add_css_class("chip")
+        shut.connect("clicked", lambda *_a: win.close())
+        bar.append(shut)
+        col.append(bar)
+
+        outer.append(col)
+        win.present()
 
     def _open_about(self) -> None:
         win, outer = self._dialog("About", 560, 460)

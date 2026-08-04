@@ -77,6 +77,12 @@ python3 tests/test_arg_repair.py || fail=1
 echo "== results cache =="
 python3 tests/test_cache.py || fail=1
 
+echo "== the stop button =="
+python3 tests/test_stop.py || fail=1
+
+echo "== the trace =="
+python3 tests/test_trace.py || fail=1
+
 echo "== design lint (contrast, type scale, sheet) =="
 python3 tests/test_design.py || fail=1
 

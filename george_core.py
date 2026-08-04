@@ -39,7 +39,7 @@ from george_platform import IS_WINDOWS
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "4.0.0"
+VERSION = "4.2.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = osx.config_dir()
@@ -1248,8 +1248,26 @@ class Ollama:
 
         return self._consume(resp, on_token, stop, on_stall, stall_after)
 
-    @staticmethod
-    def _consume(resp, on_token, stop, on_stall, stall_after):
+    def abort(self) -> None:
+        """Close the live response from another thread.
+
+        Breaking out of the read loop is not enough on its own: the
+        iterator blocks until the NEXT token arrives, so on CPU
+        inference the stop button appeared dead for however long the
+        model took to produce one more token. Closing the socket makes
+        the read fail immediately AND makes ollama notice nobody is
+        listening, so it stops generating instead of finishing an answer
+        that has been cancelled.
+        """
+        resp = getattr(self, "_live", None)
+        if resp is None:
+            return
+        try:
+            resp.close()
+        except Exception:
+            pass
+
+    def _consume(self, resp, on_token, stop, on_stall, stall_after):
         """Drain the NDJSON stream into one string.
 
         Extracted so the compatibility retry above can share it -- it
@@ -1259,7 +1277,8 @@ class Ollama:
         chunks: List[str] = []
         last_token = time.time()
         warned = False
-        with resp:
+        self._live = resp
+        try:
             for raw in resp:
                 if stop.is_set():
                     break
@@ -1290,6 +1309,18 @@ class Ollama:
                         on_stall(waited)
                 if obj.get("done"):
                     break
+        except Exception as exc:
+            # A close() from abort() lands here as a read error. That is
+            # the stop button working, not a fault.
+            if not stop.is_set():
+                raise
+            log("stream closed by stop (%s)" % type(exc).__name__)
+        finally:
+            self._live = None
+            try:
+                resp.close()
+            except Exception:
+                pass
         return "".join(chunks)
 
 

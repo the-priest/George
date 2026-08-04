@@ -1,5 +1,81 @@
 # George changelog
 
+## 4.2.0 - what just happened
+
+Every bug in this project so far was found the same way: he
+screenshotted the window and I guessed backwards from what was on it.
+The tool cards show WHICH tool ran. They do not show the arguments it
+was called with, what actually came back, whether it failed, or how long
+it took -- which is precisely the information that would have shortened
+five separate bug hunts.
+
+- **New `Trace`**: the agent now records every step of a turn - what he
+  typed, the router's decision, each model call with its duration and
+  reply size, and each tool with its ARGUMENTS and the head of its
+  actual observation, marked failed when it failed.
+- **Menu > What just happened, or Ctrl+D.** Monospaced, scrollable, with
+  a Copy button - because the point is that it ends up IN a bug report
+  rather than in a description of one.
+- Failure detection is on the observation text, so "could not open",
+  "declined", "not installed" and a crashed tool all show as `[FAILED]`
+  at a glance. An unrepairable argument is a failure too, and the trace
+  says which key was missing.
+- **Bounded at 400 rows, in memory only, and it can never break a
+  turn.** It is a debugging aid, not an audit log: it must not eat RAM
+  in a long session and must not write his paths to disk. Every `add`
+  is wrapped, and the test throws None, objects, bytes and dicts at it
+  to prove a broken trace cannot take an answer down with it.
+
+**New `tests/test_trace.py`** - boundedness under 2000 inserts, junk
+input, turn separation, and end to end: a real turn must be
+reconstructable from the trace alone, including the tool's real output
+and a failed call being marked as one.
+
+## 4.1.0 - the stop button actually stops
+
+He pressed stop and the model kept going.
+
+**The real fix: `Ollama.abort()` closes the live HTTP response.**
+Breaking out of the read loop was never enough on its own -- the
+iterator BLOCKS until the next token arrives, so on CPU inference the
+button appeared dead for however long the model took to produce one
+more. Closing the socket makes the read fail immediately AND makes
+ollama notice nobody is listening, so it stops GENERATING instead of
+finishing an answer that was cancelled and burning the CPU he is waiting
+on. `stop()` now calls it, alongside setting the flag and cutting the
+speech off.
+
+A close mid-stream lands as a read error, so `_consume` treats an
+exception WITH the stop flag set as the button working and returns the
+text received so far. With the flag NOT set it still raises - a genuine
+stream failure must not be silently swallowed as if it were a stop, and
+that is tested both ways.
+
+`call_tool` also returns immediately when the flag is already set,
+rather than starting work that has been cancelled.
+
+**A correction, recorded because it matters more than the fix.** I also
+added stop guards in front of `_repair_final` and `_verify_final`,
+believing the polish passes added in 3.7.0 were costing two more round
+trips after a cancel. I could not construct a test that reaches them:
+the action loop breaks on stop before `final_text` is ever assigned, and
+the stream check breaks earlier still. They are belt and braces, kept
+because they are free, and now labelled as such in the source so nobody
+mistakes them for the fix. The test file says the same. A test that
+cannot fail is worth nothing, and I ran the guards through three
+deliberate breaks before accepting they were unreachable rather than
+declaring victory on a green run.
+
+**New `tests/test_stop.py`** - stop mid-stream makes no further model
+calls, speaks nothing, and TELLS him it stopped rather than leaving a
+dead spinner; no new tool starts after a cancel; the router stops
+prefetching partway through a three-tool "brief me"; `stop()` sets the
+flag, cuts speech and aborts the stream; `abort()` closes the live
+response and is safe with nothing in flight; a stop-closed stream
+returns its partial text while a genuine error still raises; and a new
+turn clears the flag, because a stopped agent that stays stopped is
+worse than one that never stopped.
+
 ## 4.0.0 - roadmap 2.5: stop asking the network twice
 
 Version renamed at his request. 3.10.0 was correct semver - the minor is

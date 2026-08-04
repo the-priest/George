@@ -210,10 +210,8 @@ router" work.
 - **Session-scoped scratch memory.** `remember`/`recall` are permanent;
   there is nothing for "for the next ten minutes, the file I mean is
   X".
-- **A tool-call trace panel.** The tool cards show what ran; there is no
-  way to see the args, the raw observation, or the timing. This is a
-  debugging aid for *you*, and would have shortened several of the last
-  five bug hunts.
+- **A tool-call trace panel.** -- DONE in 4.2.0. Menu > What just
+  happened, or Ctrl+D.
 - **Streaming tool output.** A 60-second script shows nothing until it
   finishes.
 - **Feed and search source weighting.** All feeds are equal; Hacker News

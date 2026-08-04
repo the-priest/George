@@ -21,7 +21,8 @@ import sys
 import threading
 import time
 import urllib.parse
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import (Any, Callable, Dict, List, NamedTuple,
+                    Optional, Tuple)
 
 from george_core import (
     APP_NAME, DATA_DIR, DEFAULT_FEEDS, HOME, POWER_ACTIONS, MemoryStore,
@@ -878,6 +879,94 @@ def tool_open_path(args: Dict[str, Any], ag: "Agent") -> str:
 
 
 # =====================================================================
+# THE TRACE
+#
+# Every bug in this project so far was found by him screenshotting the
+# window and me guessing backwards from what was on it. The tool cards
+# show WHAT ran; they do not show the arguments, the raw observation, or
+# how long anything took -- which is exactly the information that would
+# have shortened five separate bug hunts.
+#
+# So the agent records it. Bounded, in memory, no files, and readable
+# from the UI while it is happening.
+# =====================================================================
+
+class TraceEntry(NamedTuple):
+    turn: int
+    step: int
+    kind: str          # "model" | "tool" | "route" | "note"
+    name: str
+    detail: str
+    ms: int
+    ok: bool
+
+
+class Trace:
+    """What happened this turn, in order, with timings.
+
+    Deliberately capped and deliberately in memory only: this is a
+    debugging aid, not an audit log, and it must never become the
+    reason a long session eats RAM or leaks his file paths to disk.
+    """
+
+    LIMIT = 400
+
+    def __init__(self) -> None:
+        self._rows: List[TraceEntry] = []
+        self._lock = threading.Lock()
+        self.turn = 0
+
+    def new_turn(self) -> None:
+        with self._lock:
+            self.turn += 1
+
+    def add(self, kind: str, name: str, detail: str = "", ms: int = 0,
+            ok: bool = True, step: int = 0) -> None:
+        try:
+            row = TraceEntry(self.turn, step, kind, str(name)[:60],
+                             str(detail)[:600], int(ms), bool(ok))
+            with self._lock:
+                self._rows.append(row)
+                if len(self._rows) > self.LIMIT:
+                    del self._rows[:len(self._rows) - self.LIMIT]
+        except Exception:
+            pass                      # tracing must never break a turn
+
+    def rows(self, turn: Optional[int] = None) -> List[TraceEntry]:
+        with self._lock:
+            rows = list(self._rows)
+        if turn is None:
+            return rows
+        return [r for r in rows if r.turn == turn]
+
+    def clear(self) -> None:
+        with self._lock:
+            self._rows = []
+
+    def summary(self, turn: Optional[int] = None) -> str:
+        """Human-readable, for the dialog and for pasting into a bug
+        report."""
+        rows = self.rows(turn)
+        if not rows:
+            return "nothing recorded yet"
+        out = []
+        total = 0
+        for r in rows:
+            total += r.ms
+            mark = "" if r.ok else "  [FAILED]"
+            timing = ("  %dms" % r.ms) if r.ms else ""
+            head = "%-6s %s%s%s" % (r.kind, r.name, timing, mark)
+            out.append(head)
+            if r.detail:
+                for line in r.detail.splitlines()[:6]:
+                    out.append("       %s" % line[:160])
+        out.append("")
+        out.append("%d steps, %dms total" % (len(rows), total))
+        return "\n".join(out)
+
+
+
+# =====================================================================
 # ARGUMENT REPAIR
 #
 # Constrained decoding pins the OUTER shape -- one object, a real tool
@@ -1576,6 +1665,7 @@ class Agent:
         self.ollama = Ollama(cfg)
         self.history: List[Dict[str, str]] = []
         self._prompt_cache: Optional[str] = None
+        self.trace = Trace()
         # Built once: it only changes if the tool registry changes.
         self._schema: Optional[Dict[str, Any]] = tool_schema()
         self.stop_event = threading.Event()
@@ -1745,6 +1835,9 @@ class Agent:
         orphan thread is left to finish and die on its own; killing a
         thread mid-syscall is worse than leaking one.
         """
+        if self.stop_event.is_set():
+            return "stopped before %s ran" % tool
+
         fn = TOOLS.get(tool)
         if not fn:
             return ("unknown tool %r. Valid tools: %s"
@@ -1758,10 +1851,24 @@ class Agent:
         complaint = missing_arg_message(tool, args)
         if complaint:
             log("args: %s" % complaint)
+            self.trace.add("tool", tool, complaint, ok=False)
             return complaint
 
         box: Dict[str, str] = {}
         self.confirm_elapsed = 0.0
+        _t0 = time.time()
+
+        def _record(result: str, ok: bool = True) -> str:
+            # Args AND the head of the observation, because "which tool
+            # ran" was never the question -- "what did it actually get
+            # back" was.
+            try:
+                shown = json.dumps(args, sort_keys=True)[:200]
+            except Exception:
+                shown = str(args)[:200]
+            self.trace.add("tool", tool, "%s\n%s" % (shown, result[:400]),
+                           ms=int((time.time() - _t0) * 1000), ok=ok)
+            return result
 
         def work() -> None:
             try:
@@ -1778,13 +1885,19 @@ class Agent:
         while worker.is_alive():
             worker.join(0.4)
             if self.stop_event.is_set():
-                return "%s was stopped before it finished." % tool
+                return _record("%s was stopped before it finished." % tool,
+                               ok=False)
             if time.time() - started > limit + self.confirm_elapsed:
                 log("tool %s hit the %ds watchdog" % (tool, limit))
-                return ("%s did not come back within %ds and was abandoned. "
-                        "Tell him that, and try another way."
-                        % (tool, int(limit)))
-        return box.get("result", "%s returned nothing" % tool)
+                return _record(
+                    "%s did not come back within %ds and was abandoned. "
+                    "Tell him that, and try another way."
+                    % (tool, int(limit)), ok=False)
+        result = box.get("result", "%s returned nothing" % tool)
+        failed = any(w in result[:80].lower() for w in
+                     ("failed", "could not", "cannot", "refused",
+                      "declined", "no such", "not installed"))
+        return _record(result, ok=not failed)
 
     # ---- the loop ----------------------------------------------------
     def run_turn(self, user_text: str) -> None:
@@ -1793,6 +1906,8 @@ class Agent:
         # One prompt for the whole turn: rebuilt here, then byte-identical
         # for every step, so ollama can reuse its cached prefix.
         self.refresh_prompt()
+        self.trace.new_turn()
+        self.trace.add("note", "user", user_text[:200])
         self.history.append({"role": "user", "content": user_text})
         last_calls: List[str] = []
         # Whether any real tool ran this turn.  A canned final answer only
@@ -1827,6 +1942,7 @@ class Agent:
                 log("router failed, falling through: %s" % exc)
             if plan is not None:
                 log("router: %s" % intent.describe(plan))
+                self.trace.add("route", plan.name, intent.describe(plan))
                 pre: List[str] = []
                 for tool, args in plan.prefetch:
                     if self.stop_event.is_set():
@@ -1855,10 +1971,15 @@ class Agent:
 
                 self.on_step("thinking (step %d)" % (step_no + 1))
                 log("agent: calling chat_stream with %d history items" % len(self.history))
+                _t0 = time.time()
                 reply = self.ollama.chat_stream(self.messages(), self.on_token,
                                                 self.stop_event,
                                                 on_stall=stalled, model=model,
                                                 schema=self._schema)
+                self.trace.add("model", "step %d" % (step_no + 1),
+                               "%d chars back" % len(reply or ""),
+                               ms=int((time.time() - _t0) * 1000),
+                               step=step_no + 1)
                 log("agent: chat_stream returned %d chars" % len(reply))
                 if self.stop_event.is_set():
                     self.on_step("stopped")
@@ -1940,14 +2061,31 @@ class Agent:
                     log("agent: tool %s returned %d chars" % (tool, len(result)))
 
                 if final_text is not None:
-                    final_text = self._repair_final(
-                        final_text, observations, recent_observations,
-                        model, ran_tool_this_turn)
-                    final_text = self._verify_final(
-                        final_text, observations, recent_observations,
-                        model, ran_tool_this_turn)
+                    # Both of these make their own model call, so they
+                    # must not run after he pressed stop.
+                    #
+                    # HONEST NOTE: I could not construct a test that
+                    # reaches these with the flag already set -- the
+                    # action loop above breaks on stop before final_text
+                    # is ever assigned, and the stream check breaks
+                    # earlier still. They are belt and braces, kept
+                    # because they are free and because the loop above
+                    # has been restructured four times; if a future
+                    # change lets a stop land between there and here,
+                    # these are what stop the button going dead for two
+                    # round trips. Do not mistake them for the fix --
+                    # the real one is Ollama.abort().
+                    if not self.stop_event.is_set():
+                        final_text = self._repair_final(
+                            final_text, observations, recent_observations,
+                            model, ran_tool_this_turn)
+                    if not self.stop_event.is_set():
+                        final_text = self._verify_final(
+                            final_text, observations, recent_observations,
+                            model, ran_tool_this_turn)
                     self.on_final(final_text)
-                    self.tts.speak(final_text)
+                    if not self.stop_event.is_set():
+                        self.tts.speak(final_text)
                     break
 
                 if observations:
@@ -1997,6 +2135,8 @@ class Agent:
     def _ask_for_json_only(self, model: str) -> str:
         """One more attempt, with the protocol restated as bluntly as it
         can be. Returns "" if that fails too."""
+        if self.stop_event.is_set():
+            return ""
         try:
             msgs = list(self.messages())
             msgs.append({
@@ -2051,6 +2191,8 @@ class Agent:
             that can eat replies is worse than none.
         """
         text = str(final_text or "").strip()
+        if self.stop_event.is_set():
+            return text
         if not ran_tool or not text:
             return text
         if str(self.cfg.get("verify", "on")).lower() == "off":
@@ -2154,6 +2296,8 @@ class Agent:
         text = str(final_text or "").strip()
         if not text:
             text = "(no reply)"
+        if self.stop_event.is_set():
+            return text
         if not ran_tool or not self._is_canned(text):
             return text
         if not self.cfg.get("final_replacement_enabled", True):
@@ -2194,7 +2338,22 @@ class Agent:
                          daemon=True, name="george-turn").start()
 
     def stop(self) -> None:
+        """Cancel the turn.
+
+        Sets the flag every loop and every stream checks, cuts the
+        speech off mid-sentence, and closes the live HTTP response so
+        ollama stops GENERATING rather than carrying on into a socket
+        nobody is reading. Without that last part the model keeps
+        burning CPU until it finishes the answer he just cancelled.
+        """
         self.stop_event.set()
-        self.tts.stop()
+        try:
+            self.tts.stop()
+        except Exception:
+            pass
+        try:
+            self.ollama.abort()
+        except Exception:
+            pass
 
 

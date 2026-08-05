@@ -1864,16 +1864,37 @@ class Agent:
         """
         self._prompt_cache = None
 
+    def volatile_context(self) -> str:
+        """The facts that CHANGE, kept OUT of the system prompt.
+
+        The clock, uptime and battery used to live in the system prompt.
+        That meant the prompt differed between turns as soon as the
+        minute ticked over -- and ollama caches the KV prefix of a
+        prompt, so ANY change to the system message throws the whole
+        thing away and re-prefills it from scratch.
+        His own trace showed the cost: 134 SECONDS for a 471-character
+        reply, of which roughly 85 was re-prefilling 3187 tokens of
+        prompt that had not meaningfully changed.
+
+        These now go in the LAST message instead. Everything before it
+        stays byte-identical forever, so the prefix cache survives
+        across turns and only the tail is prefilled.
+        """
+        st = system_status()
+        bits = ["NOW: %s" % time.strftime("%A %d %B %Y, %H:%M %Z"),
+                "Uptime %s" % st.get("uptime", "?")]
+        if st.get("battery"):
+            bits.append("Battery %s" % st["battery"])
+        return " | ".join(bits)
+
     def _build_system_message(self) -> str:
         st = system_status()
         name = (self.cfg.get("user_name") or "").strip()
+        # NOTHING VOLATILE IN HERE. See volatile_context() above -- a
+        # single changing character costs a full re-prefill.
         extra_bits = ["CONTEXT",
-                      "Now: %s" % time.strftime("%A %d %B %Y, %H:%M %Z"),
                       "This machine: %s" % machine_summary(),
-                      "Hostname %s, up %s" % (st.get("host", "?"),
-                                              st.get("uptime", "?"))]
-        if st.get("battery"):
-            extra_bits.append("Battery: %s" % st["battery"])
+                      "Hostname %s" % st.get("host", "?")]
         if self.cfg.get("location"):
             extra_bits.append("He is in %s." % self.cfg["location"])
         mem = self.memory.as_prompt_block()
@@ -1897,9 +1918,18 @@ class Agent:
                                     extra="\n".join(extra_bits))
 
     def messages(self) -> List[Dict[str, str]]:
+        """System prompt, history, then the volatile facts LAST.
+
+        Order matters more than content here: everything up to the final
+        message is byte-identical from one turn to the next, which is
+        what lets ollama reuse its cached prefix instead of re-prefilling
+        3000+ tokens because a clock ticked.
+        """
         msgs = [{"role": "system", "content": self.system_message()}]
         budget = 24
         msgs.extend(self.history[-budget:])
+        msgs.append({"role": "user",
+                     "content": "CONTEXT - " + self.volatile_context()})
         return msgs
 
     # Only the last HISTORY_CAP entries are ever kept.  messages() sends

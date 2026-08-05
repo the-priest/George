@@ -1,5 +1,39 @@
 # George changelog
 
+## 4.5.0 - the clock was costing 85 seconds a turn
+
+His trace, from the panel added in 4.2.0:
+
+    tool   news    4030ms
+    model  step 1  134484ms   471 chars back
+
+134 SECONDS to produce 471 characters. The arithmetic says generation
+was maybe 30 of that. The other 100 was PREFILL - and the prompt had
+not meaningfully changed.
+
+**`Now: Wednesday 05 August 2026, 00:24 UTC` was inside the system
+prompt.** ollama caches the KV prefix of a prompt; any change to the
+system message throws the whole cache away. So every turn where the
+MINUTE had ticked over re-prefilled all 3187 tokens from scratch.
+
+This is the same bug I "fixed" in 2.7.0. That change made the prompt
+stable WITHIN a turn and I never checked that it was stable BETWEEN
+turns. It was not, and the cost was ~85 seconds every single time.
+
+- **The clock, uptime and battery are out of the system prompt** and
+  into a `volatile_context()` line appended as the LAST message.
+  Everything before it is now byte-identical from one turn to the next,
+  so the prefix cache survives and only the tail is prefilled. The model
+  still gets all of it, just last.
+- **The test now pins this properly**: the system prompt must be
+  identical across turns even when the clock is moved, AND no clock,
+  uptime, battery or load average may appear anywhere in the cached
+  prefix at all - checked by pattern, not by memory of what I put there.
+  Verified by putting the clock back and watching it fail.
+
+Thank you for the trace. Four sessions of guessing at this from
+screenshots, and the panel answered it in one paste.
+
 ## 4.4.0 - four minutes for the news
 
 He asked for the news and waited FOUR MINUTES. His screenshots show

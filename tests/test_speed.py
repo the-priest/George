@@ -72,6 +72,46 @@ ag.refresh_prompt()
 check(ag._prompt_cache is None, "refresh_prompt did not clear the cache")
 check(ag.system_message() is not None, "prompt did not rebuild after refresh")
 
+# -- THE PREFIX MUST SURVIVE ACROSS TURNS ------------------------------
+# This escaped once already. 2.7.0 made the prompt stable WITHIN a turn
+# and I missed that it still changed BETWEEN turns, because the clock
+# was in it. His trace showed the bill: 134 seconds for a 471-character
+# reply, most of it re-prefilling 3187 tokens that had not meaningfully
+# changed.
+import re as _re                    # noqa: E402
+
+before = ag.system_message()
+_real_strftime = time.strftime
+try:
+    time.strftime = lambda f, *a: "A COMPLETELY DIFFERENT TIME"
+    ag.refresh_prompt()             # a NEW turn rebuilds it
+    after = ag.system_message()
+finally:
+    time.strftime = _real_strftime
+check(before == after,
+      "the system prompt changes between turns when the clock moves; "
+      "that re-prefills the whole thing every turn")
+
+# no volatile value may appear in the cached prefix at all
+for pattern, what in ((r"\d{1,2}:\d{2}", "a clock time"),
+                      (r"[Uu]ptime\s+\d", "an uptime"),
+                      (r"[Bb]attery[: ]+\d", "a battery level"),
+                      (r"[Ll]oad average", "a load average")):
+    check(not _re.search(pattern, ag.system_message()),
+          "%s is in the system prompt; anything that changes belongs in "
+          "the volatile tail, not the cached prefix" % what)
+
+# ...and it must still REACH the model, just last
+msgs = ag.messages()
+check(msgs[-1]["content"].startswith("CONTEXT - "),
+      "the volatile context is not the final message: %r"
+      % msgs[-1]["content"][:60])
+check("NOW:" in msgs[-1]["content"],
+      "the model is no longer told what time it is")
+check(msgs[0]["role"] == "system",
+      "the system prompt is not first; the prefix must be stable from "
+      "the very start")
+
 # -- machine_summary is cached and carries no live values --------------
 summary = gc.machine_summary()
 check(gc.machine_summary() is summary or gc.machine_summary() == summary,

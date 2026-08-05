@@ -281,6 +281,23 @@ _RULES: List[Tuple[str, "re.Pattern", Any]] = [
                    "The current date and time are in your CONTEXT block. "
                    "Answer directly - no tool is needed.")),
 
+    # ---- a factual question about the world ----------------------------
+    # These are exactly the questions a 4B answers confidently and
+    # wrongly from memory. Prefetching the reference means the evidence
+    # is already in front of it when it writes the sentence.
+    ("lookup", re.compile(
+        r"^(who (is|was|were)|what (is|was|are|were)|whats|"
+        r"when (did|was|is)|where (is|was)|tell me about)"
+        # The article must be FOLLOWED BY SPACE or it eats the first
+        # letter of the subject: "who is ada lovelace" matched the "a"
+        # of "ada" and looked up "da lovelace".
+        r"\s+(?:(?:a|an|the)\s+)?(?P<t>.{2,80}?)\??$"),
+     lambda m, n: ([("lookup", {"term": m.group("t").strip()})],
+                   "A reference article is in the observation above. "
+                   "Answer from it and say where it came from. If it "
+                   "does not actually answer him, say so rather than "
+                   "filling the gap from memory.")),
+
     # ---- explicit web search ------------------------------------------
     ("search", re.compile(
         r"^(search( the web)?( for)?|google|look up|find out about|"

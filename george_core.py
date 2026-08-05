@@ -39,7 +39,7 @@ from george_platform import IS_WINDOWS
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "4.2.0"
+VERSION = "4.3.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = osx.config_dir()
@@ -1946,6 +1946,9 @@ CACHE_TTL = {
     "weather": 300,
     "news": 420,
     "search": 900,
+    # Reference material barely changes; caching it for an hour makes
+    # a follow-up question instant.
+    "wiki": 3600,
     "page": 900,
 }
 
@@ -1991,6 +1994,62 @@ def cache_age(kind: str, key: str) -> Optional[int]:
     with _CACHE_LOCK:
         hit = _CACHE.get("%s:%s" % (kind, key))
     return int(time.time() - hit[0]) if hit else None
+
+
+
+# =====================================================================
+# REFERENCE LOOKUP
+#
+# A 4B model does not KNOW very much, and the dangerous part is that it
+# does not know that it does not know -- it fills gaps with fluent,
+# confident, wrong text. The fix is not a bigger model. It is giving the
+# small one somewhere reliable to look.
+#
+# Wikipedia's REST API is used rather than scraping: it returns a clean
+# summary, it is stable, it needs no key, and it gives a URL George can
+# cite. A cited answer he can check beats a confident one he cannot.
+# =====================================================================
+
+WIKI_API = "https://en.wikipedia.org/w/api.php"
+WIKI_REST = "https://en.wikipedia.org/api/rest_v1/page/summary/"
+
+
+def wiki_search(term: str, count: int = 5) -> List[Dict[str, str]]:
+    """Article titles matching a term."""
+    q = urllib.parse.urlencode({
+        "action": "query", "list": "search", "srsearch": term,
+        "srlimit": max(1, min(count, 10)), "format": "json",
+        "srprop": "snippet",
+    })
+    raw = http_get("%s?%s" % (WIKI_API, q), timeout=15)
+    data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
+    out = []
+    for hit in (data.get("query", {}).get("search") or []):
+        out.append({
+            "title": str(hit.get("title", "")),
+            "snippet": re.sub(r"<[^>]+>", "", str(hit.get("snippet", ""))),
+        })
+    return out
+
+
+def wiki_summary(title: str) -> Dict[str, str]:
+    """The lead section of one article, plus its URL for citing."""
+    url = WIKI_REST + urllib.parse.quote(title.replace(" ", "_"), safe="")
+    raw = http_get(url, timeout=15)
+    data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
+    if data.get("type", "").endswith("not_found"):
+        return {"error": "no article called %r" % title}
+    page = (data.get("content_urls", {}).get("desktop", {}) or {}).get("page")
+    return {
+        "title": str(data.get("title", title)),
+        "description": str(data.get("description", "") or ""),
+        "extract": str(data.get("extract", "") or ""),
+        "url": str(page or ("https://en.wikipedia.org/wiki/"
+                            + urllib.parse.quote(title.replace(" ", "_")))),
+        # A disambiguation page is not an answer, and treating it as one
+        # is how a lookup turns into confident nonsense.
+        "kind": str(data.get("type", "") or ""),
+    }
 
 
 

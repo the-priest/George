@@ -46,6 +46,7 @@ gc.http_get = lambda url, timeout=15: (
     '<rss><channel><item><title>T</title><link>http://x.invalid</link>'
     '<description>d</description></item></channel></rss>')
 gt.http_get = gc.http_get
+gt.wiki_search = lambda t, n=5: []
 gt.web_search = lambda q, n=6: [{"title": "R", "url": "http://x.invalid",
                                  "snippet": "s"}]
 gt.html_to_text = lambda b: "page text"
@@ -137,6 +138,7 @@ for _attr in sorted(_needed):
 # Valid args per tool. A tool missing from here gets {} for the happy
 # case too -- which is correct for the ones that take nothing.
 VALID = {
+    "lookup": {"term": "python"},
     "web_search": {"query": "python"},
     "research": {"query": "python", "read": 1},
     "open_page": {"url": "http://x.invalid"},

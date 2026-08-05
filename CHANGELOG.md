@@ -1,5 +1,47 @@
 # George changelog
 
+## 4.3.0 - retrieval over recall
+
+A 4B does not know very much, and the dangerous part is that it does not
+know that it does not know: a half-remembered fact feels exactly like a
+known one, so it fills the gap with fluent, confident, wrong text. The
+fix is not a bigger model. It is somewhere reliable to look, a rule that
+says look BEFORE answering, and a router that has already looked by the
+time the model writes the sentence.
+
+- **New `lookup` tool.** Wikipedia first - structured, citable, stable,
+  no key - then the open web, then an honest "I could not check". Never
+  memory. The observation always carries a URL so George can say where
+  the answer came from and he can check it.
+- **A disambiguation page is not an answer.** "Mercury may refer to:"
+  served as fact is exactly how a lookup becomes confident nonsense, so
+  those are skipped and the next real article is used. Tested with a
+  two-page Mercury fixture.
+- **New rule R3: WHEN YOU ARE NOT SURE, LOOK IT UP.** Dates, numbers,
+  versions, who did what, how something works. Looking things up is the
+  job, not an admission of weakness.
+- **Router prefetches the reference** for "who is X", "what is a X",
+  "when did X", "tell me about X" - so the evidence is in front of the
+  model before it writes anything. Specific tools still win: "what is
+  the weather" goes to weather, "what is my ip" to network, "what is
+  wrong with my box" to diagnose.
+- Cached for an hour, because an encyclopaedia article is not current
+  data.
+
+**BUG CAUGHT WHILE WRITING THE ROUTER RULE:** the optional article in
+`(a|an|the)?` matched the "a" of "ada", so "who is ada lovelace" looked
+up "da lovelace". The article now has to be followed by whitespace.
+
+**Three tests failed on this and all three were right.** The prompt went
+over its 3200-token ceiling (trimmed back to 3187 without losing a
+single rule - the ceiling exists for a reason and moving it would have
+been the lazy fix); the tool-surface test had no valid-args case for the
+new tool; and the cache test rejected the 1-hour wiki TTL. That last one
+I fixed by SPLITTING the rule rather than weakening it: current data
+(weather, news, search) keeps its tight 15-minute ceiling because
+serving it stale is the same as being wrong, while reference data does
+not need one.
+
 ## 4.2.0 - what just happened
 
 Every bug in this project so far was found the same way: he

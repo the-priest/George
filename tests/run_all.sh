@@ -83,6 +83,9 @@ python3 tests/test_stop.py || fail=1
 echo "== the trace =="
 python3 tests/test_trace.py || fail=1
 
+echo "== reference lookup (wikipedia, then web) =="
+python3 tests/test_lookup.py || fail=1
+
 echo "== design lint (contrast, type scale, sheet) =="
 python3 tests/test_design.py || fail=1
 

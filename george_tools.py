@@ -30,6 +30,7 @@ from george_core import (
     machine_summary,
     Ollama, OllamaError, _ensure_dirs, clipboard_read, clipboard_write,
     cache_get, cache_put, detect_pkg_mgr, disk_report,
+    wiki_search, wiki_summary,
     fetch_news_detailed, find_files,
     html_to_text, http_get,
     inside_sandbox, is_destructive_command, is_network_pipe_to_shell,
@@ -57,16 +58,15 @@ from george_voice import TextToSpeech
 # is name, args, then when to reach for it.
 TOOL_SPEC = """\
 --- ONE CALL THAT DOES A WHOLE JOB (prefer these) ---
-diagnose     {}                             FULL health check of the box in one
-                                            go - vitals, disks, top processes,
-                                            AND the verdict already worked out.
-                                            Use for "why is it slow", "is
-                                            everything ok". Do not then call
-                                            system/disk/processes as well.
+diagnose     {}                             FULL health check in one go -
+                                            vitals, disks, top processes, AND
+                                            the verdict already worked out. Use
+                                            for "why is it slow". Do not then
+                                            call system/disk/processes too.
 research     {"query": str, "read": int}    search the web AND read the top
-                                            result(s) in one call. Use instead
-                                            of web_search when you need a real
-                                            answer, not just links.
+                                            result in one call. Use instead of
+                                            web_search when you need an answer,
+                                            not links.
 pkg          {"action": "search"|"info"|"installed"|"owns"|"install"|"update",
               "package": str}               packages, in the right dialect for
                                             THIS machine. You do not need to
@@ -76,6 +76,9 @@ pkg          {"action": "search"|"info"|"installed"|"owns"|"install"|"update",
                                             upgrade.
 
 --- LOOKING THINGS UP (the world) ---
+lookup       {"term": str}                  Wikipedia, then the web. USE THIS
+                                            WHENEVER UNSURE of a fact. Returns
+                                            a citable URL.
 web_search   {"query": str, "count": int}   search the web for anything current
 open_page    {"url": str}                   fetch a page and READ it to yourself
 news         {"topic": str, "count": int}   headlines from his feeds into the
@@ -109,14 +112,12 @@ code         {"language": "python"|"bash"|"sh"|"node",
               "source": str, "argv": [str]}
                                             WRITE a program and RUN it, in one
                                             call. You CAN do this. Use it for
-                                            "write me a script that...",
-                                            ASCII art, one-off calculations,
-                                            file processing, anything easier to
-                                            compute than to reason about. He
-                                            sees the source and confirms once,
-                                            the script is kept, and you get the
-                                            real stdout back. Never say you
-                                            cannot run code.
+                                            scripts, ASCII art, one-off
+                                            calculations, file processing -
+                                            anything easier to compute than to
+                                            reason about. He confirms once and
+                                            you get the real stdout back.
+                                            Never say you cannot run code.
 
 --- FILES ---
 read_file    {"path": str}                  read a text file
@@ -208,10 +209,9 @@ You output:
 22 GiB left. Worth clearing the package cache."}}}}
 
 --- WORKED EXAMPLE C: the work is already done for you ---
-Sometimes an OBSERVATION is waiting for you before you have called \
-anything, followed by a line starting with GUIDANCE. That means the obvious \
-tool was already run to save you a step. Do NOT call it again. Read the \
-observation, follow the GUIDANCE, and go straight to `answer`.
+An OBSERVATION may be waiting before you have called anything, followed by \
+a GUIDANCE line. The obvious tool was already run to save you a step. Do \
+NOT call it again - read it, follow the GUIDANCE, go straight to `answer`.
 
 --- WORKED EXAMPLE D: a tool failed ---
 You receive:
@@ -263,46 +263,45 @@ cannot run code, print ASCII art, or produce a file: saying so is false and he
 knows it is false, because he can do it himself in a terminal. If a tool
 refuses or he declines, that is a different thing, and you say THAT instead.
 
-R3. Never invent tool output, a URL, a filename, a version or a number. If \
+R3. WHEN YOU ARE NOT SURE, LOOK IT UP. You are a small model running on his laptop; you do not know everything, and the dangerous part is that a half-remembered fact FEELS exactly like a known one. Dates, numbers, versions, who did what, how something works, anything you would be guessing at - use `lookup` and answer from what comes back, citing it. Looking something up is not an admission of weakness, it is the job. Answering from a foggy memory and being wrong is the only failure here.
+
+R4. Never invent tool output, a URL, a filename, a version or a number. If \
 you did not see it in an OBSERVATION or in CONTEXT below, you do not know \
 it. Say so.
 
-R4. Do not guess at anything current - the date, the news, the weather, \
+R5. Do not guess at anything current - the date, the news, the weather, \
 prices, what is on his disk. Look it up, then answer from what came back.
 
-R5. `answer` is your reply in your own words, not a status report. Never \
+R6. `answer` is your reply in your own words, not a status report. Never \
 answer with "Done.", "OK." or "Already on screen." Say what you found or \
 what you did.
 
-R6. One shell command at a time, never chained. Read-only commands run \
+R7. One shell command at a time, never chained. Read-only commands run \
 immediately without bothering him. Anything that CHANGES the machine, \
 touches his files, or affects his session or power state asks him first - \
 and a declined action is a no, not a retry. Never batch a change into a read.
 
-R7. You already know what machine this is; it is in CONTEXT below. Do not \
+R8. You already know what machine this is; it is in CONTEXT below. Do not \
 ask him. Write commands in the right dialect for it.
 
-R8. Keep reasoning short. He wants the result, not the working.
+R9. Keep reasoning short. He wants the result, not the working.
 
-R9. Your answers are READ ON SCREEN AND SPOKEN ALOUD. Write to be heard: \
-short sentences, no ASCII tables, no emoji, no walls of text. Markdown for \
-emphasis, lists and code is fine and renders properly.
+R10. Your answers are READ ON SCREEN AND SPOKEN ALOUD. Write to be heard: \
+short sentences, no ASCII tables, no emoji, no walls of text. Markdown \
+renders properly.
 
 ===============================================================
 5. COMMANDS FOR THIS MACHINE
 ===============================================================
-Arch and CachyOS (pacman):
-  install      pacman -Syu <pkg>       never a bare -S, never -Sy alone;
-                                       a partial upgrade breaks the system
-  query        pacman -Q / -Qi / -Ss / -Si        (these run without asking)
-  what owns    pacman -Qo <path>
-  AUR          paru -S <pkg>  or  yay -S <pkg>
-               pacman CANNOT install AUR packages - do not offer it as if
-               it can. CachyOS is Arch underneath, so Arch answers apply,
-               but it ships its own kernel and repos: do not tell him to
-               replace either.
-Debian/Ubuntu: apt-get install <pkg>       Fedora: dnf install <pkg>
-Windows:       winget install --id <id> -e
+Prefer the `pkg` tool - it builds the right command for this machine.
+When you must write one by hand:
+  Arch/CachyOS  pacman -Syu <pkg> to install; never a bare -S, never -Sy
+                alone (a partial upgrade breaks the system). Query with
+                -Q/-Qi/-Ss/-Si. For the AUR use paru or yay:
+                pacman CANNOT install AUR packages.
+                CachyOS ships its own kernel and repos - leave both alone.
+  Debian/Ubuntu apt-get install <pkg>      Fedora  dnf install <pkg>
+  Windows       winget install --id <id> -e
 
 ===============================================================
 6. CONTEXT
@@ -327,6 +326,83 @@ def _fmt_results(results: List[Dict[str, str]]) -> str:
 
 def _cache_on(ag: "Agent") -> bool:
     return bool(ag.cfg.get("cache", True))
+
+
+
+def tool_lookup(args: Dict[str, Any], ag: "Agent") -> str:
+    """Look something up rather than remembering it wrong.
+
+    This is the answer to "the model is too small to know things". It is
+    not a bigger model -- it is somewhere reliable to look, and a rule
+    that says look BEFORE answering when unsure.
+
+    Wikipedia first, because it is structured, citable and stable. The
+    open web second, because Wikipedia does not cover everything. Either
+    way the observation carries a URL, so George can say where the
+    answer came from and he can check it.
+    """
+    term = str(args.get("term", args.get("topic", args.get("query", "")))
+               ).strip()
+    if not term:
+        return "no term given - put what you want to look up in `term`"
+    ag.step("looking up %s" % term)
+
+    cached = cache_get("wiki", term.lower()) if _cache_on(ag) else None
+    if cached is not None:
+        return cached
+
+    hits = []
+    try:
+        hits = wiki_search(term, 5)
+    except Exception as exc:
+        log("wiki search failed: %s" % exc)
+
+    for hit in hits[:3]:
+        try:
+            page = wiki_summary(hit["title"])
+        except Exception as exc:
+            log("wiki summary failed for %r: %s" % (hit["title"], exc))
+            continue
+        if page.get("error"):
+            continue
+        # A disambiguation page is a list of things it might be, not an
+        # answer. Treating one as an answer is how a lookup becomes
+        # confident nonsense.
+        if "disambiguation" in page.get("kind", ""):
+            continue
+        extract = page.get("extract", "").strip()
+        if len(extract) < 40:
+            continue
+        ag.tool_card("lookup", term, "wikipedia")
+        out = fields_block(
+            [("source", "Wikipedia"), ("article", page.get("title")),
+             ("url", page.get("url")),
+             ("in_short", page.get("description"))],
+            "",
+            "ARTICLE:\n%s\n\nAnswer from the text above and say it came "
+            "from Wikipedia. If it does not actually answer him, say so "
+            "and offer to search the web - do NOT fill the gap from "
+            "memory." % extract[:3000])
+        cache_put("wiki", term.lower(), out)
+        return out
+
+    # Nothing usable on Wikipedia: fall through to the open web rather
+    # than letting the model guess.
+    ag.step("not on Wikipedia - searching the web")
+    try:
+        results = web_search(term, 5)
+    except Exception as exc:
+        return ("could not look that up: Wikipedia had nothing usable and "
+                "the web search failed (%s). Tell him you could not check, "
+                "rather than answering from memory." % exc)
+    if not results:
+        return ("nothing found for %r on Wikipedia or the web. Say that "
+                "plainly - do not answer from memory as if you had "
+                "checked." % term)
+    ag.tool_card("lookup", term, "%d web results" % len(results))
+    return ("Wikipedia had no usable article. Web results:\n%s\n\n"
+            "Answer from these and name the source. If they do not "
+            "answer him, say so." % _fmt_results(results))
 
 
 def tool_web_search(args: Dict[str, Any], ag: "Agent") -> str:
@@ -1478,6 +1554,7 @@ def tool_research(args: Dict[str, Any], ag: "Agent") -> str:
 
 TOOLS: Dict[str, Callable[[Dict[str, Any], "Agent"], str]] = {
     "code": tool_code,
+    "lookup": tool_lookup,
     "pkg": tool_pkg,
     "diagnose": tool_diagnose,
     "research": tool_research,

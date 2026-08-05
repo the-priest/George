@@ -65,13 +65,19 @@ time.sleep(1.2)
 check(gc.cache_get("probe", "k") is None,
       "an expired value was still served - stale data is worse than slow")
 
-# every TTL must be short enough to be honest about "now"
+# Every TTL must be short enough to be honest about the data it holds.
+# CURRENT data (weather, news, search) has a tight ceiling: serving it
+# stale is the same as being wrong. REFERENCE data does not -- an
+# encyclopaedia article is not "current", and pretending it needs a
+# 15-minute ceiling would just mean re-fetching it for no reason.
+CURRENT = {"weather", "news", "search", "page"}
 for kind, ttl in gc.CACHE_TTL.items():
     if kind == "probe":
         continue
-    check(ttl <= 900,
-          "%s is cached for %ds; that is too long to call it current"
-          % (kind, ttl))
+    ceiling = 900 if kind in CURRENT else 86400
+    check(ttl <= ceiling,
+          "%s is cached for %ds; that is too long for %s data"
+          % (kind, ttl, "current" if kind in CURRENT else "reference"))
     check(ttl >= 60, "%s TTL of %ds is too short to help" % (kind, ttl))
 check(gc.CACHE_TTL["weather"] <= gc.CACHE_TTL["news"],
       "weather should expire at least as fast as news - he asks because "

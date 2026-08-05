@@ -1,5 +1,46 @@
 # George changelog
 
+## 4.4.0 - four minutes for the news
+
+He asked for the news and waited FOUR MINUTES. His screenshots show
+"thinking (step 1)" the whole time, which was the clue: it never looped.
+A SINGLE step took four minutes. Working out where the time actually
+went turned up two regressions of my own.
+
+- **REGRESSION I CAUSED: num_ctx back to 8192.** I raised it to 16384
+  two sessions ago for observation headroom. That was the wrong trade on
+  a CPU-only laptop: a bigger KV cache costs memory bandwidth on EVERY
+  generated token, and GENERATION - not context - is what makes him
+  wait. With the news observation now ~440 tokens instead of ~1700, 8192
+  leaves plenty of room.
+- **The news payload was enormous.** 20 headlines, each with a
+  200-character summary and a URL: ~1700 tokens to prefill on every
+  step. Now capped at 10 headlines, summaries and URLs on the first five
+  only: ~440 tokens. Default news_count 12 -> 8.
+- **The answer itself was the biggest cost.** He got a 12-item numbered
+  list - about 368 tokens - and at three to six tokens a second on that
+  CPU that alone is one to two minutes. The news observation now asks
+  for THREE OR FOUR SENTENCES on what matters, not one line per
+  headline. The rest are in the sidebar where he can read them.
+- **It also LOOKED frozen, and that is its own bug.** `on_stall` only
+  fires when NOTHING arrives, but the tokens were arriving - slowly. So
+  the label sat on "thinking (step 1)" for four minutes while it was in
+  fact working, which is indistinguishable from a hang. It now reports
+  "writing - 42s, 90 words so far", updated every 1.5 seconds.
+- **Forced termination** (from earlier this session): once tools have
+  produced something and a few steps have gone by, the schema is
+  constrained to `answer` ONLY, so another loop is unrepresentable
+  rather than merely discouraged. Verified against a model that never
+  volunteers an answer: 14 calls and no reply before, 4 calls and an
+  answer after. It would NOT have helped this particular case - his turn
+  never left step 1 - and saying so matters more than claiming the fix.
+
+**New `tests/test_termination.py`** - a model that never answers is made
+to answer, the answer-only schema is actually used, it does not fire
+before there is anything to answer from, a normal two-step turn is
+untouched, it is switchable off, the news observation stays under 900
+tokens, and a slow generation reports visible progress.
+
 ## 4.3.0 - retrieval over recall
 
 A 4B does not know very much, and the dangerous part is that it does not

@@ -452,7 +452,11 @@ def tool_news(args: Dict[str, Any], ag: "Agent") -> str:
         # after they came back.
         if items:
             cache_put("news", ckey, (items, failures, tried))
-    items = items[:max(3, min(count, 30))]
+    # HARD CAP. 20 headlines is not more useful than 10, it is just
+    # more tokens to read and then more tokens to write about -- and
+    # writing is the slow part on CPU. He waited four minutes for a
+    # 12-item list he did not ask for.
+    items = items[:max(3, min(count, 10))]
     ag.show_news(items)
     ag.tool_card("news", topic or "top stories", "%d headlines" % len(items))
 
@@ -473,12 +477,19 @@ def tool_news(args: Dict[str, Any], ag: "Agent") -> str:
                 "come back, and what failed. Do not say anything is on his "
                 "screen.")
 
+    # SIZE MATTERS MORE THAN COMPLETENESS. 20 headlines with 200-char
+    # summaries and a URL each is ~1700 tokens, and the loop re-prefills
+    # the whole thing on every step. He asked for the news, not for a
+    # wire feed: give the model enough to summarise from and no more.
+    # Summaries only on the first few, URLs only where it can cite them.
     lines = []
     for i, it in enumerate(items, 1):
-        lines.append("%d. [%s] %s\n   %s" %
-                     (i, it["source"], it["title"], it["url"]))
-        if it.get("summary"):
-            lines.append("   %s" % it["summary"][:200])
+        lines.append("%d. [%s] %s" % (i, it["source"], it["title"]))
+        if i <= 5:
+            if it.get("summary"):
+                lines.append("   %s" % it["summary"][:140])
+            if it.get("url"):
+                lines.append("   %s" % it["url"])
 
     head = ("%d headline%s retrieved from %d feed%s, and listed in the NEWS "
             "card in his sidebar. Nothing has been opened on his screen."
@@ -491,9 +502,11 @@ def tool_news(args: Dict[str, Any], ag: "Agent") -> str:
         head += (" That is very few - say so, and name the feeds that "
                  "failed rather than pretending this is all the news there "
                  "is.")
-    head += (" Summarise these for him. If he asked you to PUT them ON HIS "
-             "SCREEN, follow up with the `show` tool on one of the URLs "
-             "below and only claim it is open if `show` says it opened.")
+    head += (" Give him THREE OR FOUR SENTENCES on what matters - not a "
+             "numbered list of everything, and not one line per headline. "
+             "He can read the rest in the sidebar. If he asked you to PUT "
+             "them ON HIS SCREEN, use `show` on one of the URLs below and "
+             "only claim it is open if `show` says it opened.")
     return head + "\n" + "\n".join(lines)
 
 
@@ -1243,6 +1256,29 @@ def fields_block(fields: List[Tuple[str, Any]], summary: str = "",
 # shape that MATTERS -- one object, a known tool name, an args object --
 # is what gets pinned.
 # =====================================================================
+
+def answer_only_schema() -> Dict[str, Any]:
+    """Schema with `answer` as the ONLY permitted tool.
+
+    Constrained decoding masks the sampler, so under this schema the
+    model cannot emit another tool call even if it wants to. That is
+    what makes termination a guarantee rather than a hope: asking a 4B
+    nicely to stop looping does not work, and 14 steps of a 1700-token
+    observation is minutes of CPU for an answer it already had.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string", "enum": ["answer"]},
+            "args": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        },
+        "required": ["tool", "args"],
+    }
+
 
 def tool_schema() -> Dict[str, Any]:
     """JSON Schema for exactly one action object."""
@@ -2048,11 +2084,55 @@ class Agent:
 
                 self.on_step("thinking (step %d)" % (step_no + 1))
                 log("agent: calling chat_stream with %d history items" % len(self.history))
+                # FORCED TERMINATION. Once tools have produced something
+                # and a couple of steps have gone by, stop letting it
+                # choose a tool at all: constrain the schema to `answer`
+                # so another loop is not merely discouraged, it is
+                # unrepresentable. Without this a 20-headline news turn
+                # re-prefilled ~4900 tokens up to fourteen times, which
+                # on CPU is minutes of "thinking" for an answer it had
+                # after step one.
+                try:
+                    force_after = int(self.cfg.get("force_answer_after", 3))
+                except (TypeError, ValueError):
+                    force_after = 3
+                forced = (force_after > 0 and step_no >= force_after
+                          and bool(recent_observations))
+                step_schema = (answer_only_schema() if forced
+                               else self._schema)
+                if forced:
+                    log("agent: forcing an answer at step %d" % (step_no + 1))
+                    self.on_step("wrapping up")
+                    self.history.append({
+                        "role": "user",
+                        "content": ("You have everything you need above. "
+                                    "Answer him NOW from it. Do not call "
+                                    "another tool."),
+                    })
+
+                # LIVE PROGRESS. `stalled` only fires when NOTHING comes
+                # back, but on CPU the tokens do arrive -- at three or
+                # four a second. So the label sat on "thinking (step 1)"
+                # for four minutes while it was in fact working, and
+                # there was no way to tell that from a hang. Count what
+                # arrives and say so.
                 _t0 = time.time()
-                reply = self.ollama.chat_stream(self.messages(), self.on_token,
+                _prog = {"n": 0, "last": 0.0}
+
+                def counting_token(piece: str) -> None:
+                    _prog["n"] += len(piece)
+                    now = time.time()
+                    if now - _prog["last"] >= 1.5:
+                        _prog["last"] = now
+                        self.on_step("writing - %ds, %d words so far"
+                                     % (int(now - _t0), _prog["n"] // 5))
+                    self.on_token(piece)
+
+                reply = self.ollama.chat_stream(self.messages(),
+                                                counting_token,
                                                 self.stop_event,
                                                 on_stall=stalled, model=model,
-                                                schema=self._schema)
+                                                schema=step_schema)
                 self.trace.add("model", "step %d" % (step_no + 1),
                                "%d chars back" % len(reply or ""),
                                ms=int((time.time() - _t0) * 1000),

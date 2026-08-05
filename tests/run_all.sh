@@ -86,6 +86,9 @@ python3 tests/test_trace.py || fail=1
 echo "== reference lookup (wikipedia, then web) =="
 python3 tests/test_lookup.py || fail=1
 
+echo "== the loop must terminate =="
+python3 tests/test_termination.py || fail=1
+
 echo "== design lint (contrast, type scale, sheet) =="
 python3 tests/test_design.py || fail=1
 

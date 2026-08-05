@@ -39,7 +39,7 @@ from george_platform import IS_WINDOWS
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "4.3.0"
+VERSION = "4.4.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = osx.config_dir()
@@ -79,16 +79,20 @@ DEFAULTS: Dict[str, Any] = {
     # between a reply and a wait.
     "model": "qwen3:4b",
     "temperature": 0.6,
-    # 16384, not 8192. The system prompt is ~2.5k, and a multi-tool turn
-    # like "brief me" spends ~1.5k per observation: at 8192 that left room
-    # for three before George started forgetting the start of his own
-    # turn. 16384 buys nine. The cost is ~1.2 GB more KV cache (fp16,
-    # qwen3:4b) and proportionally more prefill time on CPU -- fine on a
-    # 16 GB laptop, which is why this is not 32768. That would be ~4.8 GB
-    # of cache and double the wait before the first token appears, to buy
-    # headroom a desktop assistant turn does not use.
-    "num_ctx": 16384,
+    # BACK TO 8192. I raised this to 16384 for observation headroom, and
+    # that was the wrong trade on a CPU-only laptop: a bigger KV cache
+    # costs memory bandwidth on EVERY generated token, and generation --
+    # not context -- is what makes him wait. With the news observation
+    # now ~630 tokens instead of ~1700, 8192 is ample: prompt 3.2k +
+    # observation 0.6k leaves 4k of room. Raise it in Settings only if a
+    # turn actually runs out of context.
+    "num_ctx": 8192,
     "keep_alive": "30m",
+    # After this many steps WITH observations in hand, the schema is
+    # constrained to `answer` only, so the loop cannot run on. 0 = never
+    # force. This is what stops a big observation being re-prefilled a
+    # dozen times.
+    "force_answer_after": 3,
     "max_steps": 14,
     "request_timeout": 300,
     "stall_seconds": 90,             # no token for this long = say so
@@ -146,7 +150,9 @@ DEFAULTS: Dict[str, Any] = {
     "chat_max_sessions": 60,
 
     "feeds": DEFAULT_FEEDS,
-    "news_count": 12,
+    # 8, not 12. Every headline is tokens the model must read AND then
+    # write about, and generation is the slow part on CPU.
+    "news_count": 8,
     "location": "",                  # blank = wttr.in geo-IP guess
     "browser": "",                   # blank = xdg-open
     "user_name": "",
@@ -163,6 +169,7 @@ LIMITS: Dict[str, Tuple[float, float]] = {
     "temperature": (0.0, 2.0),
     "num_ctx": (1024, 131072),
     "max_steps": (1, 40),
+    "force_answer_after": (0, 12),
     "request_timeout": (10, 3600),
     "stall_seconds": (10, 600),
     "tool_timeout": (5, 900),

@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 import html as _html
 import json
+import math
 import os
 import platform
 import re
@@ -39,7 +40,7 @@ from george_platform import IS_WINDOWS
 
 APP_ID = "com.thepriest.george"
 APP_NAME = "George"
-VERSION = "4.5.0"
+VERSION = "4.7.0"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = osx.config_dir()
@@ -132,6 +133,12 @@ DEFAULTS: Dict[str, Any] = {
     "watch_speak": True,
     "sounds": True,
 
+    # What the model is TOLD it can do. simple = news, lookups, the
+    # web, this machine, memory - which is what George is mostly for,
+    # and 40% less prompt to prefill before he says a word. full adds
+    # shell commands, code, files, eyes, media and power. Every tool
+    # stays callable either way; this only sets what is advertised.
+    "mode": "simple",                # simple | full
     "persona": "jarvis",             # jarvis | plain | blunt
     "accent": "cyan",                # cyan | amber | violet | green | red
     "ui_density": "comfortable",     # comfortable | compact
@@ -191,6 +198,7 @@ CHOICES: Dict[str, Tuple[str, ...]] = {
     "structured": ("auto", "off"),
     "verify": ("on", "off"),
     "voice_engine": ("auto", "piper", "espeak", "sapi", "none"),
+    "mode": ("simple", "full"),
     "persona": ("jarvis", "plain", "blunt"),
     "watch_mode": ("advice", "banter", "quiet"),
     "accent": ("cyan", "amber", "violet", "green", "red", "white"),
@@ -223,10 +231,20 @@ def coerce_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 if isinstance(value, str):
                     value = value.strip().lower() in ("1", "true", "yes", "on")
                 value = bool(value)
-            elif isinstance(default, float):
-                value = float(value)
-            elif isinstance(default, int):
-                value = int(float(value))
+            elif isinstance(default, (float, int)):
+                # `inf` and `nan` are REAL VALUES IN A JSON FILE: python's
+                # json module parses 1e999 as inf and accepts a bare NaN,
+                # so both arrive here from a file a human edited. Neither
+                # can be clamped (max(lo, nan) silently returns lo) and
+                # int(inf) raises OverflowError, which the old except
+                # clause did not catch -- so a single bad number in
+                # config.json took the whole app down at startup, which
+                # is the exact failure this function exists to prevent.
+                number = float(value)
+                if number != number or number in (float("inf"),
+                                                  float("-inf")):
+                    raise ValueError("not a finite number")
+                value = number if isinstance(default, float) else int(number)
             elif isinstance(default, str):
                 value = str(value)
             elif isinstance(default, list):
@@ -237,7 +255,7 @@ def coerce_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
                             if isinstance(r, (list, tuple)) and len(r) >= 2
                             and str(r[1]).strip()]
                     value = rows or default
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             log("config: %s=%r is not usable, using the default" % (key, value))
             value = default
 
@@ -1069,8 +1087,21 @@ class ChatStore:
                 self.sessions.insert(0, {"id": session_id, "title": title,
                                          "messages": messages,
                                          "ts": time.time()})
-            self.sessions = self.sessions[:60]
+            # Settings has a "Chats kept" spinner bound to
+            # chat_max_sessions, and this line used to be a hardcoded
+            # 60 -- so the spinner moved, saved, and changed nothing at
+            # all. A setting that does not settle anything is worse than
+            # no setting: he has no way to tell it is not working.
+            self.sessions = self.sessions[:self._cap()]
             _write_json(CHATS_PATH, self.sessions)
+
+    def _cap(self) -> int:
+        raw = self.cfg.get("chat_max_sessions", 60)
+        try:
+            cap = int(float(raw if raw is not None else 60))
+        except (TypeError, ValueError, OverflowError):
+            cap = 60
+        return max(1, min(cap, 500))
 
     def get(self, session_id: str) -> Optional[Dict[str, Any]]:
         with _store_lock:
@@ -2244,6 +2275,87 @@ def take_screenshot() -> Tuple[bool, str]:
     return False, "no screenshot tool found (grim, spectacle, scrot...)"
 
 
+# How big an answer we are willing to spend time computing, as a count
+# of decimal digits. 100k digits is far past anything he would ask for
+# and still returns instantly.
+_CALC_MAX_DIGITS = 100000
+
+
+def _calc_const(node: Any) -> Optional[float]:
+    """The value of an exponent, or None if it cannot be pinned down.
+
+    `2**64` is fine and `10**(3*2)` is fine; both need a NUMBER out of
+    the right-hand side before the cost of the power can be judged. So
+    a literal is read directly and anything else is folded -- but only
+    after its own magnitude clears the budget, which is what stops the
+    fold itself becoming the expensive computation (`2**(2**20)`).
+    """
+    while isinstance(node, ast.UnaryOp) and isinstance(
+            node.op, (ast.USub, ast.UAdd)):
+        node = node.operand
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        try:
+            return abs(float(node.value))
+        except (OverflowError, ValueError):
+            return None
+    if _calc_magnitude(node) > 12:
+        return None
+    try:
+        return abs(float(eval(compile(ast.Expression(body=node),
+                                      "<calc>", "eval"),
+                             {"__builtins__": {}}, {})))
+    except Exception:
+        return None
+
+
+def _calc_magnitude(node: Any) -> float:
+    """Rough log10 of the largest value this subtree could produce.
+
+    WHY THIS EXISTS: the node whitelist below permits `**`, and `**` is
+    the one arithmetic operator that turns a short string into an
+    unbounded amount of work. `9**9**9` is four characters of user input
+    that never returns -- it pegs a core and allocates until the box
+    swaps. The tool watchdog abandons the call after tool_timeout, but
+    the THREAD keeps computing, so abandoning it does not get the CPU
+    back. It has to be refused before eval() is reached.
+
+    Returns float("inf") for anything that cannot be bounded, which is
+    the fail-closed direction.
+    """
+    if isinstance(node, ast.Expression):
+        return _calc_magnitude(node.body)
+    if isinstance(node, ast.Constant):
+        try:
+            v = abs(float(node.value))
+        except (TypeError, ValueError, OverflowError):
+            return float("inf")
+        return math.log10(v) if v > 1.0 else 0.0
+    if isinstance(node, ast.UnaryOp):
+        return _calc_magnitude(node.operand)
+    if isinstance(node, ast.Tuple):
+        return max([_calc_magnitude(e) for e in node.elts] or [0.0])
+    if isinstance(node, ast.BinOp):
+        left = _calc_magnitude(node.left)
+        right = _calc_magnitude(node.right)
+        if isinstance(node.op, ast.Pow):
+            # The EXPONENT's value is what matters, not its magnitude,
+            # so it has to be a literal we can read. `2**n` where n is
+            # itself an expression is unbounded as far as this can tell.
+            value = _calc_const(node.right)
+            if value is None:
+                return float("inf")
+            try:
+                return left * abs(value)
+            except OverflowError:
+                return float("inf")
+        if isinstance(node.op, ast.Mult):
+            return left + right
+        if isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
+            return left
+        return max(left, right) + 1.0          # Add / Sub
+    return float("inf")
+
+
 def safe_calc(expression: str) -> str:
     """Arithmetic without eval()."""
     allowed = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
@@ -2259,6 +2371,10 @@ def safe_calc(expression: str) -> str:
         if isinstance(node, ast.Constant) and not isinstance(
                 node.value, (int, float)):
             return "refused: numbers only"
+    if _calc_magnitude(tree) > _CALC_MAX_DIGITS:
+        return ("refused: that answer would be over %d digits long and "
+                "would take longer to work out than it is worth. Say so."
+                % _CALC_MAX_DIGITS)
     try:
         return str(eval(compile(tree, "<calc>", "eval"), {"__builtins__": {}}, {}))
     except Exception as exc:

@@ -47,6 +47,15 @@ python3 tests/test_speed.py || fail=1
 echo "== intent router =="
 python3 tests/test_router.py || fail=1
 
+echo "== regressions found by reading, not by the suite =="
+python3 tests/test_regressions_4_6.py || fail=1
+
+echo "== router coverage + the raw-string rule =="
+python3 tests/test_router_coverage.py || fail=1
+
+echo "== what a turn costs (prefill + generation budgets) =="
+python3 tests/test_turn_cost.py || fail=1
+
 echo "== system prompt =="
 python3 tests/test_prompt.py || fail=1
 
@@ -101,6 +110,7 @@ xvfb-run -a python3 tests/test_audit.py || fail=1
 step "gtk ui (needs xvfb-run)"
 if command -v xvfb-run >/dev/null; then
   xvfb-run -a python3 tests/test_ui.py || fail=1
+  xvfb-run -a python3 tests/test_ui_stress.py || fail=1
 else
   echo "skipped - install xvfb to run the UI test headless"
 fi

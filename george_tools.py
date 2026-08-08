@@ -15,6 +15,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -167,6 +168,106 @@ Short. Blunt. No pleasantries, no hedging, no closing offers. Answer, then \
 stop. Swearing is fine if it is his register first.""",
 }
 
+# =====================================================================
+# WHICH TOOLS THE MODEL IS TOLD ABOUT
+#
+# All 34 tools stay registered and callable in every mode. This only
+# decides what goes in the PROMPT, and it matters twice over:
+#
+#   * 1300 tokens of tool spec is 40% of the system prompt, and on a
+#     laptop with no GPU the prompt is prefilled before George says a
+#     word.
+#   * A 4B scanning 34 tool descriptions picks by string similarity. It
+#     reaches for `run` when it should answer, and `read_file` when it
+#     should look something up. Fewer, better-chosen tools make it more
+#     accurate, not just faster - that is the bigger half of the win.
+#
+# SIMPLE is what George is mostly for: reading the news, looking things
+# up, talking, and answering questions about this machine. Everything
+# in FULL is still there and still works if the model asks for it by
+# name; it is just not advertised.
+# =====================================================================
+
+SIMPLE_GROUPS = (
+    "ONE CALL THAT DOES A WHOLE JOB",
+    "LOOKING THINGS UP",
+    "PUTTING SOMETHING IN FRONT OF HIM",
+    "THIS MACHINE",
+    "MEMORY",
+    "ENDING THE TURN",
+)
+
+
+def tool_spec_for(mode: str) -> str:
+    """The tool section of the prompt, for `simple` or `full`."""
+    if str(mode or "").lower() != "simple":
+        return TOOL_SPEC
+    out, keep = [], False
+    for line in TOOL_SPEC.splitlines(True):
+        if line.startswith("--- "):
+            head = line.strip("- \n")
+            keep = any(head.startswith(g) for g in SIMPLE_GROUPS)
+        if keep:
+            out.append(line)
+    out.append(
+        "\nHe can also run shell commands, write and run code, open and\n"
+        "search files, read the screen, control media and volume, and\n"
+        "power the machine down. Those are not listed above because they\n"
+        "are rarely what he wants. If he asks for one plainly, say so and\n"
+        "he will turn on the full tool list in Settings.\n")
+    return "".join(out)
+
+
+# The three parts of the prompt that only make sense when the tools they
+# describe are on the table. In simple mode they are not merely wasted
+# tokens -- R2 told the model outright "You CAN write files and run
+# programs" while `code` and `run` were not in its list, which is a
+# straight contradiction and exactly the sort of thing a 4B resolves
+# badly.
+
+R_CODE_FULL = (
+    "You CAN write files and run programs. If he asks for a script, use\n"
+    "`code` - write it AND run it, then show him the real output. Never "
+    "claim you\ncannot run code, print ASCII art, or produce a file: "
+    "saying so is false and he\nknows it is false, because he can do it "
+    "himself in a terminal. If a tool\nrefuses or he declines, that is a "
+    "different thing, and you say THAT instead.")
+
+R_CODE_SIMPLE = (
+    "Running programs and writing files are switched off right now, so do "
+    "not\noffer to do either. If he wants that, tell him plainly it is "
+    "Settings >\nAssistant > Tools, and he can turn it on. Do not pretend "
+    "you are unable\nto in principle - you are not, it is just off.")
+
+R_SHELL_FULL = (
+    "One shell command at a time, never chained. Read-only commands run "
+    "immediately without bothering him. Anything that CHANGES the "
+    "machine, touches his files, or affects his session or power state "
+    "asks him first - and a declined action is a no, not a retry. Never "
+    "batch a change into a read.")
+
+R_SHELL_SIMPLE = (
+    "You cannot run shell commands in this mode. Use `system`, `disk`, "
+    "`network` or `diagnose` for questions about the machine - they run "
+    "on their own and need no command written by hand.")
+
+COMMANDS_FULL = (
+    "Prefer the `pkg` tool - it builds the right command for this "
+    "machine.\nWhen you must write one by hand:\n"
+    "  Arch/CachyOS  pacman -Syu <pkg> to install; never a bare -S, "
+    "never -Sy\n                alone (a partial upgrade breaks the "
+    "system). Query with\n                -Q/-Qi/-Ss/-Si. For the AUR "
+    "use paru or yay:\n                pacman CANNOT install AUR "
+    "packages.\n                CachyOS ships its own kernel and repos - "
+    "leave both alone.\n"
+    "  Debian/Ubuntu apt-get install <pkg>      Fedora  dnf install "
+    "<pkg>\n  Windows       winget install --id <id> -e")
+
+COMMANDS_SIMPLE = (
+    "Use the `pkg` tool - it builds the right command for this machine, "
+    "so you\ndo not need to know pacman from apt.")
+
+
 SYSTEM_PROMPT = """You are George, {name} desktop assistant. You run \
 entirely on this machine: a local Ollama model, no API key, no cloud, no \
 telemetry, nothing leaves the box. You are Basilisk's brother - same build \
@@ -257,11 +358,7 @@ is will be obvious to him, because he is looking at the screen. If a tool \
 failed or returned less than you expected, say that instead. Being wrong \
 about what you just did is worse than doing nothing.
 
-R2. You CAN write files and run programs. If he asks for a script, use
-`code` - write it AND run it, then show him the real output. Never claim you
-cannot run code, print ASCII art, or produce a file: saying so is false and he
-knows it is false, because he can do it himself in a terminal. If a tool
-refuses or he declines, that is a different thing, and you say THAT instead.
+R2. {r_code}
 
 R3. WHEN YOU ARE NOT SURE, LOOK IT UP. You are a small model running on his laptop; you do not know everything, and the dangerous part is that a half-remembered fact FEELS exactly like a known one. Dates, numbers, versions, who did what, how something works, anything you would be guessing at - use `lookup` and answer from what comes back, citing it. Looking something up is not an admission of weakness, it is the job. Answering from a foggy memory and being wrong is the only failure here.
 
@@ -276,10 +373,7 @@ R6. `answer` is your reply in your own words, not a status report. Never \
 answer with "Done.", "OK." or "Already on screen." Say what you found or \
 what you did.
 
-R7. One shell command at a time, never chained. Read-only commands run \
-immediately without bothering him. Anything that CHANGES the machine, \
-touches his files, or affects his session or power state asks him first - \
-and a declined action is a no, not a retry. Never batch a change into a read.
+R7. {r_shell}
 
 R8. You already know what machine this is; it is in CONTEXT below. Do not \
 ask him. Write commands in the right dialect for it.
@@ -293,15 +387,7 @@ renders properly.
 ===============================================================
 5. COMMANDS FOR THIS MACHINE
 ===============================================================
-Prefer the `pkg` tool - it builds the right command for this machine.
-When you must write one by hand:
-  Arch/CachyOS  pacman -Syu <pkg> to install; never a bare -S, never -Sy
-                alone (a partial upgrade breaks the system). Query with
-                -Q/-Qi/-Ss/-Si. For the AUR use paru or yay:
-                pacman CANNOT install AUR packages.
-                CachyOS ships its own kernel and repos - leave both alone.
-  Debian/Ubuntu apt-get install <pkg>      Fedora  dnf install <pkg>
-  Windows       winget install --id <id> -e
+{commands}
 
 ===============================================================
 6. CONTEXT
@@ -613,6 +699,31 @@ def tool_run(args: Dict[str, Any], ag: "Agent") -> str:
 
 
 
+def _python_exe() -> str:
+    """The interpreter that can run a generated script.
+
+    `sys.executable` is the obvious answer and is WRONG in the build he
+    actually installs on Windows: inside a PyInstaller bundle
+    sys.executable is george.exe, not python. So `code` with
+    language=python launched a second copy of George and handed it the
+    script as argv[1]. The old guard could not catch it either -- it
+    skipped the which() check precisely when the value came from
+    sys.executable.
+
+    Frozen: find a real python on PATH, or admit there is none.
+    Not frozen: sys.executable is correct and is the interpreter George
+    is already running under, which is the one whose libraries the model
+    can assume.
+    """
+    if not getattr(sys, "frozen", False) and sys.executable:
+        return sys.executable
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return ""
+
+
 def tool_code(args: Dict[str, Any], ag: "Agent") -> str:
     """Write a script and run it, in ONE call.
 
@@ -632,10 +743,11 @@ def tool_code(args: Dict[str, Any], ag: "Agent") -> str:
     if not source.strip():
         return "no source given - put the program in `source`"
 
+    python = _python_exe()
     runners = {
-        "python": ("py", [sys.executable or "python3"]),
-        "python3": ("py", [sys.executable or "python3"]),
-        "py": ("py", [sys.executable or "python3"]),
+        "python": ("py", [python]),
+        "python3": ("py", [python]),
+        "py": ("py", [python]),
         "bash": ("sh", ["bash"]),
         "sh": ("sh", ["sh"]),
         "shell": ("sh", ["bash"]),
@@ -647,7 +759,11 @@ def tool_code(args: Dict[str, Any], ag: "Agent") -> str:
                 % lang)
     ext, argv0 = runners[lang]
 
-    if argv0[0] != sys.executable and shutil.which(argv0[0]) is None:
+    if not argv0[0]:
+        return ("there is no python interpreter on this machine, so that "
+                "script cannot run here. Say so, and show him the source "
+                "instead.")
+    if not os.path.isabs(argv0[0]) and shutil.which(argv0[0]) is None:
         return ("%s is not installed on this machine, so that script "
                 "cannot run here. Say so." % argv0[0])
 
@@ -1407,6 +1523,10 @@ def salvage_answer(text: str) -> str:
 
 _PKG_VERBS = ("search", "info", "install", "installed", "owns", "update")
 
+# What a package name may contain. `owns` is given a PATH rather than a
+# name, so / is in the set.
+_PKG_NAME = re.compile(r"^[A-Za-z0-9/][A-Za-z0-9._+@/-]{0,80}$")
+
 
 def tool_pkg(args: Dict[str, Any], ag: "Agent") -> str:
     """Package management WITHOUT the model knowing the dialect.
@@ -1427,6 +1547,18 @@ def tool_pkg(args: Dict[str, Any], ag: "Agent") -> str:
         return "no package manager found on this machine"
     if verb != "update" and not pkg:
         return "no package name given for %s" % verb
+
+    # The command below is BUILT BY STRING INTERPOLATION and handed to a
+    # shell, and `package` comes from the model. A name is a name: if it
+    # contains anything a package name cannot contain, it is not a
+    # package name and the right answer is to refuse rather than to
+    # quote something odd and run it. The destructive gate downstream
+    # would catch the dangerous shapes, but it should never be the first
+    # line of defence for input this easy to constrain.
+    if pkg and not _PKG_NAME.match(pkg):
+        return ("%r is not a package name. Use letters, digits and "
+                ". _ + - @ / only." % pkg[:60])
+    pkg = shlex.quote(pkg)
 
     # (command, is_read_only) per manager per verb. Read-only forms run
     # immediately; anything that changes the box goes through the normal
@@ -1911,10 +2043,18 @@ class Agent:
         # assistant." Possessive is applied here so an unset name gives a
         # clean sentence instead of a broken one.
         who = ("%s's" % name) if name else "the user's"
+        simple = str(self.cfg.get("mode", "simple")).lower() == "simple"
         return SYSTEM_PROMPT.format(distro=st.get("distro", "this machine"),
                                     name=who,
                                     persona=persona,
-                                    tools=TOOL_SPEC,
+                                    tools=tool_spec_for(
+                                        self.cfg.get("mode", "simple")),
+                                    r_code=(R_CODE_SIMPLE if simple
+                                            else R_CODE_FULL),
+                                    r_shell=(R_SHELL_SIMPLE if simple
+                                             else R_SHELL_FULL),
+                                    commands=(COMMANDS_SIMPLE if simple
+                                              else COMMANDS_FULL),
                                     extra="\n".join(extra_bits))
 
     def messages(self) -> List[Dict[str, str]]:
@@ -2394,12 +2534,23 @@ class Agent:
 
         try:
             verdict = self.ollama.chat_stream(
-                [{"role": "system",
-                  "content": ("You are checking one answer against the "
-                              "evidence it was drawn from. Reply with JSON "
-                              "only.")},
+                # THE SYSTEM MESSAGE MUST BE THE USUAL ONE. This used to
+                # send a bespoke "you are checking an answer" system
+                # prompt, and ollama caches the KV of a prompt PREFIX --
+                # so a different system message threw the whole cached
+                # prefix away, and the NEXT turn then re-prefilled all
+                # ~3200 tokens from scratch. That is the same cost as
+                # the clock bug fixed in 4.5.0, roughly a minute and a
+                # half on his laptop, and it was being paid after every
+                # single tool-backed answer. The checking instructions
+                # work just as well in the user turn, where they cost
+                # nothing but themselves.
+                [{"role": "system", "content": self.system_message()},
                  {"role": "user",
                   "content": (
+                      "Put your assistant role aside for one moment and "
+                      "check an answer against the evidence it was drawn "
+                      "from. Reply with JSON only.\n\n"
                       "EVIDENCE:\n%s\n\nANSWER GIVEN TO THE USER:\n%s\n\n"
                       "Is every factual claim in the answer supported by "
                       "the evidence above? Claims about what was OPENED, "

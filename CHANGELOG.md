@@ -1,5 +1,192 @@
 # George changelog
 
+## 4.7.0 - fewer tools, and the news stopped paying for the same prompt twice
+
+He said what he actually wants this for: a fast local interface for the
+news and for talking. Most of what George carries is not that, and this
+pass is about the difference.
+
+### The verification pass was throwing away the prompt cache
+
+Every tool-backed answer runs a second model call to check the answer
+against the evidence. That call sent its own system message - "You are
+checking one answer against the evidence it was drawn from" - which is
+a perfectly sensible thing to write and a very expensive thing to send.
+**ollama caches the KV of a prompt PREFIX.** A different system message
+means the cached ~3200 tokens are gone, so the NEXT question re-prefills
+the whole prompt from scratch.
+
+That is the same cost as the clock bug in 4.5.0, about a minute and a
+half on his laptop, and it was being paid after every single news
+request. The checking instructions moved into the user turn, where they
+cost nothing but themselves. Nothing about the check changed.
+
+Found by measuring rather than reading: `tests/test_turn_cost.py` now
+reports, per turn, the model calls, the tokens prefilled fresh, the
+tokens prefilled on every call, and the tokens written - and fails if a
+call sends a system message that differs from the first one. Verified by
+putting the old message back and watching it fail.
+
+### A tool set that matches the job
+
+The prompt described 34 tools in 1327 tokens, 42% of the whole thing.
+For reading the news and having a conversation, most of that is furniture
+- and it costs twice:
+
+  * it is prefilled before George says a word, and
+  * a 4B scanning 34 descriptions picks by string similarity. It reaches
+    for `run` when it should answer and `read_file` when it should look
+    something up. **Fewer tools makes it more accurate, not just
+    faster**, and that is the bigger half.
+
+New setting, Settings > Behaviour > Tool set, defaulting to **simple**:
+news, the web, lookups, this machine, memory, and putting a page on
+screen. 19 tools instead of 35, and the prompt drops from 3173 to 2521
+tokens. **full** is the old list and is one click away.
+
+Every tool stays registered and callable in both modes - this only
+changes what is advertised - so nothing breaks if the model asks for
+something by name.
+
+It also removed a contradiction. Rule R2 said "You CAN write files and
+run programs" in the same breath as a tool list containing neither, and
+a small model resolves that badly. Simple mode now says the honest
+thing: it is switched off, here is where to turn it on, and no, George
+is not claiming to be incapable - he is not.
+
+### Also
+
+The shell, code and pacman-dialect sections of the prompt are mode-aware
+too. Their warnings still matter enormously when the tools are on the
+table - a bare `pacman -S` is a partial upgrade and breaks an Arch box -
+so the tests that pin them now check full mode, where they apply, and
+simple mode is checked for the opposite: that it does not promise
+anything it was not given the tools for.
+
+## 4.6.0 - the normalised text is not the message
+
+He asked me to find the bugs and fix them all. The suite was already
+green, so everything below came from reading and from probing, not from
+a test that was failing.
+
+**First: the suite only LOOKED broken.** Every failure in this container
+was `Namespace Gtk not available`. Install `gir1.2-gtk-4.0 gir1.2-adw-1
+xvfb python3-gi-cairo` and all thirty-odd files pass. Noted in the
+README now so the next person does not go hunting for a fault that is
+not there.
+
+### The bug that turned up four times
+
+`normalise()` in the router lowercases the message and strips everything
+outside `[\w\s:/.@-]`. That is right for deciding WHICH rule fires and
+catastrophic for anything carried out of the message:
+
+    open https://youtu.be/dQw4w9WgXcQ?t=43  ->  .../dqw4w9wgxcq   404
+    open ~/projects                         ->  "open projects"   no ~
+    calculate 15*23                         ->  "15 23"           no *
+    find files called *.log                 ->  ".log"            no glob
+
+The first one is the worst: every link he pasted with a capital letter,
+a query string or a fragment in it opened the wrong page, and a YouTube
+id is case-sensitive. The URL, path, arithmetic and glob rules now all
+read the RAW string, and the rule is written into the module: **the
+normalised text decides which rule fires and never supplies a tool
+argument.** `test_router_coverage.py` checks that for every
+payload-carrying route at once, so a fifth instance cannot appear
+quietly.
+
+### Other things that were wrong
+
+- **The weather rule looked up places that are not places.** `(?P<where>.*)`
+  handed everything after the keyword to wttr.in, so "what's the weather
+  like today" asked about a place called `like today` and "forecast for
+  the weekend" asked about `the weekend`. A location is now only taken
+  when a preposition introduces something that reads like a place;
+  otherwise it is blank, which means "where he is" and is the right
+  answer to an unqualified question anyway.
+- **"search for X" ran a package search.** The pkg rule sat above the web
+  search rule and was not anchored, so "search for quantum computing"
+  ran `pacman -Ss quantum`. The verb now has to be `install`, or the
+  word "package" has to be in the sentence.
+- **"help me write a bash script" was small talk.** `help` was an
+  alternative inside the about-George pattern, so a real request was
+  answered with "This is small talk... Do not use a tool."
+- **"what's the time in tokyo" was answered from his own clock.** The
+  CONTEXT block carries HIS local time, so that rule may only fire for a
+  question about his clock. It declines when a place follows.
+- **`safe_calc` could be made to never return.** `9**9**9` is four
+  characters that peg a core and allocate until the box swaps. The tool
+  watchdog abandons the CALL but not the THREAD, so abandoning it does
+  not give the CPU back - it has to be refused before `eval` is reached.
+  A magnitude estimator now refuses anything over 100k digits, with
+  constant folding so `10**(3*2)` still computes.
+- **One bad number in config.json crashed George at startup.** Python's
+  json parses `1e999` as `inf` and accepts a bare `NaN`. `int(inf)`
+  raises OverflowError, which the except clause did not catch. That is
+  the exact failure `coerce_config` exists to prevent. Non-finite values
+  are now rejected explicitly - `nan` cannot be clamped either, because
+  `max(lo, nan)` silently returns `lo`.
+- **"Chats kept" was a dead setting.** The spinner in Settings goes from
+  5 to 500 and `ChatStore.save` truncated at a hardcoded 60. A setting
+  that settles nothing is worse than no setting, because there is no way
+  to tell it is not working.
+- **`code` relaunched George instead of python, in the Windows build.**
+  It used `sys.executable`, which inside a PyInstaller bundle is
+  george.exe. The old guard could not catch it either: it skipped the
+  `which()` check for precisely that value.
+- **`pkg` put a model-supplied name straight into a shell string.** The
+  destructive gate downstream caught the dangerous shapes, but it should
+  never be the first line of defence for input this easy to constrain.
+  Validated and quoted now.
+
+### Faster
+
+- **The window could not freeze on a runaway reply any more.** `_pulse`
+  ran the JSON-stripping scan over the WHOLE accumulated reply eight
+  times a second while it was still growing, and fed an ever-longer
+  selectable GtkLabel: quadratic work on the UI thread. A normal answer
+  is a few thousand characters and none of it mattered. A model stuck in
+  a repetition loop streams until `request_timeout` - five minutes - and
+  that is exactly when the window has to stay responsive enough to press
+  stop. Only the tail is scanned and shown now; the full reply is
+  rendered properly once, as before.
+- **Router coverage 37% -> 54%** on a realistic corpus, still ~11us per
+  message. Added `open_path`, `list_dir`, `calc`, and `open_page` -
+  reading a URL is now a different thing from opening it - plus wider
+  `recall` and `find`. Every hit is one model round trip removed from
+  the turn, which on his laptop is tens of seconds. The remaining misses
+  are all state changes (media, volume, launch, timer, note) and the
+  router is not allowed to prefetch those.
+
+### How the last four were found
+
+Reading found the router bugs. The rest came from properties rather than
+inspection, and the method is worth keeping:
+
+- `coerce(coerce(x)) == coerce(x)` over every config key and every nasty
+  value - this is what found the startup crash.
+- 247 semantics-preserving transforms (sudo, env, timeout, `sh -c`,
+  `$( )`, backticks, quoting, tabs, CRLF) applied to known-dangerous and
+  known-safe commands. **Zero misses and zero false positives** - the
+  gate is genuinely solid, which is worth knowing too.
+- An AST cross-check of the arg names TOOL_SPEC advertises against the
+  keys each tool actually reads, and ARG_REQUIRED against the
+  constrained-decoding schema. Both clean.
+- 200 turns, watching history, trace rows, threads and log size. All
+  bounded.
+- The prompt is byte-identical across five timezones, so the 4.5.0
+  KV-cache fix holds.
+
+Three new files, all in `run_all.sh`: `test_regressions_4_6.py`,
+`test_router_coverage.py`, `test_ui_stress.py` - the last drives the
+real window through fifteen adversarial replies and treats any
+"failed:" or "UNCAUGHT" line in the LOG as the verdict, because the
+fail-safe wrappers swallow exceptions by design.
+
+NOT verified: anything needing a real Windows kernel, live network
+(search, RSS and wttr.in are blocked in my container), and real ollama
+timings. The speed claim is measured in model calls, not seconds.
+
 ## 4.5.0 - the clock was costing 85 seconds a turn
 
 His trace, from the panel added in 4.2.0:

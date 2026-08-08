@@ -345,6 +345,12 @@ class AiBubble:
 SIDEBAR_WIDTH = 336
 
 BUBBLE_CHARS = 74
+
+# How much of a reply still in flight is scanned, and shown, on each
+# repaint. See _pulse: both used to be "all of it", eight times a
+# second, on the UI thread.
+STREAM_SCAN_CHARS = 12000
+STREAM_SHOW_CHARS = 6000
 USER_BUBBLE_CHARS = 58
 
 SUGGESTIONS = [
@@ -987,16 +993,36 @@ class GeorgeWindow(Adw.ApplicationWindow):
     def _pulse(self) -> bool:
         """Repaint the streaming bubble ~8x a second instead of once per
         token -- a 7B model on a local GPU emits faster than GTK can
-        usefully redraw, and this also proves the app is not stuck."""
+        usefully redraw, and this also proves the app is not stuck.
+
+        BOUNDED ON PURPOSE. Both halves of this used to work on the
+        WHOLE accumulated reply, eight times a second, while it was
+        still growing: O(n^2) scanning on the UI thread, plus a GtkLabel
+        being asked to wrap and lay out an ever-longer selectable string
+        on every repaint. A normal answer is a few thousand characters
+        and none of that matters. A model stuck in a repetition loop --
+        the classic small-model failure -- streams until request_timeout
+        (five minutes by default), and that is exactly the case where
+        the window must stay responsive so he can hit stop.
+
+        Only the tail can still be changing, so only the tail is scanned
+        and only the tail is shown. The full reply is rendered properly
+        once, in _ui_final.
+        """
         raw = self._live_raw
         if raw:
-            visible = strip_action_json(raw)
+            scan = raw if len(raw) <= STREAM_SCAN_CHARS \
+                else raw[-STREAM_SCAN_CHARS:]
+            visible = strip_action_json(scan)
+            if len(raw) > STREAM_SCAN_CHARS and visible:
+                visible = "[...]\n" + visible
+            visible = visible[-STREAM_SHOW_CHARS:]
             if self._live_bubble is None and visible:
                 self._live_bubble = self.add_ai_bubble("")
             if self._live_bubble is not None:
                 self._live_bubble.set_streaming_text(visible)
             if self.cfg.get("show_reasoning", True):
-                tail = reasoning_of(raw).replace("\n", " ")
+                tail = reasoning_of(scan).replace("\n", " ")
                 self.think_lbl.set_text(tail[-160:] if tail else "")
         return True
 
@@ -2063,6 +2089,15 @@ class GeorgeWindow(Adw.ApplicationWindow):
         # --- behaviour page
         page = Adw.PreferencesPage(title="Behaviour",
                                    icon_name="emblem-system-symbolic")
+        grp = Adw.PreferencesGroup(
+            title="Tools",
+            description="What George is TOLD he can do. Fewer tools means "
+                        "a shorter prompt to read before he answers, and a "
+                        "small model picks better from a short list. "
+                        "Simple covers news, the web, lookups, this "
+                        "machine and memory.")
+        grp.add(combo_for("mode", ["simple", "full"], "Tool set"))
+        page.add(grp)
         grp = Adw.PreferencesGroup(
             title="Character",
             description="How he talks. The tools do not change.")

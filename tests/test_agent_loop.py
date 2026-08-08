@@ -78,7 +78,8 @@ if not obs: fails.append("observation was not fed back into history")
 if "host:" not in (obs[0]["content"] if obs else ""): fails.append("observation body missing vitals")
 # system prompt must carry tools + date
 sysmsg = calls["prompts"][0][0]["content"]
-for needle in ("web_search", "answer", "show", "Basilisk's brother", "pacman -Syu"):
+# pacman lines are full-mode only now; see test_prompt.py
+for needle in ("web_search", "answer", "show", "Basilisk's brother", "pkg"):
     if needle not in sysmsg: fails.append("system prompt missing %r" % needle)
 
 # --- stop button honesty: hitting stop mid-stream must not answer

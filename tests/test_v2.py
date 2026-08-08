@@ -256,8 +256,14 @@ agent_probe = X.Agent(C.coerce_config({}), C.MemoryStore(), _Stub.tts)
 msg = agent_probe.system_message()
 ok("prompt carries the machine", "This machine:" in msg)
 ok("prompt names the distro", st.get("distro", "zzz").split()[0] in msg)
-ok("prompt says read-only runs free", "Read-only commands run immediately"
-   in msg)
+# Read-only-runs-free is a statement about the `run` tool, which only
+# simple mode hides; check it where it applies.
+_full = C.coerce_config({"mode": "full"})
+ok("prompt says read-only runs free",
+   "Read-only commands run immediately"
+   in X.Agent(_full, C.MemoryStore(), _Stub.tts).system_message())
+ok("simple mode does not promise shell commands",
+   "Read-only commands run immediately" not in msg)
 
 # -------------------------------------------------------------- personas
 for persona in ("jarvis", "plain", "blunt"):

@@ -110,7 +110,11 @@ out = gt.tool_code({"language": "bash", "source": "echo bzzz"}, Ag())
 check("bzzz" in out, "a bash script did not run: %r" % out[:160])
 
 # -- the model must be TOLD it can do this -----------------------------
-ag2 = gt.Agent(dict(gc.DEFAULTS), gt.MemoryStore(),
+# The code tool is always REGISTERED and always callable. Whether it is
+# ADVERTISED depends on cfg["mode"], so the prompt assertions below run
+# against full mode, where the tool is on the table.
+_cfg_full = dict(gc.DEFAULTS); _cfg_full["mode"] = "full"
+ag2 = gt.Agent(_cfg_full, gt.MemoryStore(),
                type("T", (), {"speak": lambda s, t: None,
                               "stop": lambda s: None})())
 P = ag2.system_message()
@@ -119,6 +123,17 @@ check("Never say you" in P and "cannot run code" in P,
       "the prompt does not forbid claiming it cannot run code")
 check("You CAN write files and run programs" in P,
       "the prompt never states the capability positively")
+
+# In simple mode it must say the honest thing instead: not "I can't",
+# which is false, but "that is switched off, here is where".
+_cfg_s = dict(gc.DEFAULTS); _cfg_s["mode"] = "simple"
+PS = gt.Agent(_cfg_s, gt.MemoryStore(),
+              type("T", (), {"speak": lambda s, t: None,
+                             "stop": lambda s: None})()).system_message()
+check("switched off" in PS and "Settings" in PS,
+      "simple mode does not explain that running code is merely off")
+check("you are not" in PS.lower(),
+      "simple mode lets George claim he is incapable, which is untrue")
 check("code" in gt.tool_schema()["properties"]["tool"]["enum"],
       "the code tool is not in the decoding schema")
 

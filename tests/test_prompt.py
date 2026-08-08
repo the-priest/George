@@ -85,17 +85,36 @@ must_say = {
         "Never invent tool output",
     "no canned answers":
         'Never answer with "Done."',
-    "one command at a time":
-        "One shell command at a time",
     "spoken aloud":
         "READ ON SCREEN AND SPOKEN ALOUD",
-    "pacman not bare -S":
-        "never a bare -S",
-    "AUR needs paru":
-        "pacman CANNOT install AUR packages",
 }
 for name, needle in must_say.items():
     check(needle in P, "the prompt lost: %s (%r)" % (name, needle))
+
+# -- the shell rules belong to FULL mode, where shell tools exist -------
+# `run`, `code` and hand-written pacman lines are not advertised in
+# simple mode, so the warnings about them are checked where they apply.
+# They must not be lost from full mode: a bare `pacman -S` is a partial
+# upgrade and breaks an Arch box.
+FULL = agent(mode="full").system_message()
+full_must_say = {
+    "one command at a time": "One shell command at a time",
+    "pacman not bare -S": "never a bare -S",
+    "AUR needs paru": "pacman CANNOT install AUR packages",
+    "code can be run": "You CAN write files and run programs",
+}
+for name, needle in full_must_say.items():
+    check(needle in FULL, "full mode lost: %s (%r)" % (name, needle))
+
+# -- and simple mode must not CONTRADICT its own tool list -------------
+# It used to say "You CAN write files and run programs" while `code` and
+# `run` were absent from the list above it. A 4B resolves that badly.
+check("You CAN write files and run programs" not in P,
+      "simple mode offers to run programs it was not given the tools for")
+check("`code`" not in P.split("HARD RULES")[-1] or "switched off" in P,
+      "simple mode still points at the code tool")
+check("Settings" in P,
+      "simple mode does not tell him where to turn the rest back on")
 
 # -- every registered tool must be documented, and vice versa ----------
 documented = set(re.findall(r"^(\w+)\s+\{", gt.TOOL_SPEC, re.M))

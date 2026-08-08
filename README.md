@@ -162,6 +162,7 @@ george.py         GTK4 shell, HUD, dialogs, model manager
 george_core.py    config, safety gate, stores, HTTP, system, ollama lifecycle
 george_tools.py   tool registry, prompt, action parsing, agent loop
 george_voice.py   piper/espeak TTS, whisper STT
+george_intent.py  the router: obvious tools run before the model is called
 install.sh        the one-liner
 ```
 
@@ -176,6 +177,43 @@ makes it testable without a display.
 - daemon lifecycle: starts, a second instance does not steal ownership, shutdown leaves no process-group leftovers, idempotent, useful message when the binary is missing
 - the real GTK4 UI launched headless under Xvfb: window builds, a full turn runs, every dialog opens, theme reload and font scaling applied — 0 errors
 - `install.sh`: `bash -n` and `shellcheck -S warning` clean; install, launch-from-installed-path, and uninstall all exercised
+- 247 semantics-preserving transforms (sudo, env, timeout, `sh -c`, `$( )`, backticks, quoting, tabs, CRLF) over dangerous and safe commands: 0 misses, 0 false positives
+- `coerce(coerce(x)) == coerce(x)` over every config key and every malformed value, so no config file can crash startup
+- the real window driven through 15 adversarial model replies — walls of text, unclosed code fences, fake Pango markup, control characters, right-to-left text, empty answers — with the log as the verdict
+
+### Running the tests
+
+```
+bash tests/run_all.sh
+```
+
+The GTK tests need the toolkit and a virtual display. Without them the
+suite reports `Namespace Gtk not available`, which looks like a failure
+and is not:
+
+```
+sudo apt-get install gir1.2-gtk-4.0 gir1.2-adw-1 xvfb python3-gi-cairo
+```
+
+```
+sudo pacman -S gtk4 libadwaita python-gobject xorg-server-xvfb python-cairo
+```
+
+## Tool set
+
+Settings > Behaviour > Tool set.
+
+**simple** (default) tells the model about 19 tools: the news, the web,
+lookups, this machine, memory, and putting a page on screen. That is what
+George is mostly for, and it is a 2500-token prompt instead of 3200 —
+prefilled before he says a word, every session.
+
+**full** adds shell commands, running code, files, the screen-reading
+eyes, media, volume and power.
+
+Every tool is registered and callable either way; the setting only
+changes what the model is *told* about. Fewer descriptions also makes a
+4B pick better — it stops reaching for `run` when it should just answer.
 
 ## Config
 
